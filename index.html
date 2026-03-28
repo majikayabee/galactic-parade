@@ -1,0 +1,2548 @@
+
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Galactic Parade Mobile Vertical</title>
+  <style>
+    :root {
+      --bg:#05070b; --panel:#111827; --panel2:#0b1220; --line:#334155;
+      --text:#eef2ff; --sub:#9fb0c9; --cyan:#67e8f9; --red:#fb7185;
+      --orange:#f59e0b; --green:#4ade80; --purple:#a78bfa; --yellow:#facc15; --blue:#38bdf8;
+    }
+    * { box-sizing:border-box; touch-action:none; }
+    html, body {
+      margin:0; min-height:100%;
+      background:radial-gradient(circle at top,#1a2440 0%,#090c14 55%,#040507 100%);
+      color:var(--text); font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    }
+    body { min-height:100vh; display:grid; place-items:start center; padding:0; }
+    .wrap { width:min(100vw,560px); padding:10px 8px calc(14px + env(safe-area-inset-bottom)); display:flex; flex-direction:column; gap:10px; align-items:center; }
+    canvas {
+      width:100%; max-width:560px; aspect-ratio:9/16; display:block;
+      border:4px solid rgba(255,255,255,.14); border-radius:14px; background:#05070b;
+      image-rendering: pixelated; image-rendering: crisp-edges; box-shadow:0 16px 50px rgba(0,0,0,.45);
+    }
+    .info {
+      width:100%; max-width:560px; background:rgba(8,11,18,.76); border:1px solid rgba(255,255,255,.12);
+      border-radius:12px; padding:10px 12px; color:var(--sub); line-height:1.6; font-size:13px;
+    }
+    .mobilehint{ color:#dbeafe; font-weight:700; }
+
+    .configbar{
+      width:100%; max-width:560px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;
+      background:rgba(8,11,18,.76); border:1px solid rgba(255,255,255,.12); border-radius:12px; padding:8px 10px;
+      color:var(--sub); font-size:13px;
+    }
+    .cfgbtn{
+      appearance:none; border:1px solid rgba(255,255,255,.14); background:rgba(255,255,255,.06); color:#fff;
+      border-radius:10px; padding:8px 12px; cursor:pointer; font-weight:700;
+    }
+    .cfgbtn:hover{ background:rgba(255,255,255,.10); }
+    .cfgstatus{ margin-left:auto; color:var(--sub); }
+    .kbd {
+      display:inline-block; padding:1px 7px; border:1px solid rgba(255,255,255,.18); border-bottom-width:3px;
+      background:rgba(255,255,255,.06); border-radius:8px; color:#fff; font-weight:700; margin:0 2px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <canvas id="gameCanvas" width="540" height="960"></canvas>
+    <div class="configbar">
+      <button id="loadConfigBtn" class="cfgbtn">設定JSON読込</button>
+      <button id="resetConfigBtn" class="cfgbtn">設定リセット</button>
+      <span id="configStatus" class="cfgstatus">デフォルト設定</span>
+      <input id="configFileInput" type="file" accept=".json,application/json" hidden>
+    </div>
+    <div class="info">
+      PC操作:
+      <span class="kbd">WASD</span> / <span class="kbd">←↑↓→</span> 同時入力で8方向移動　
+      自動連射 / <span class="kbd">SHIFT</span> 低速移動　
+      <span class="kbd">SHIFT</span> 低速移動　
+      <span class="kbd">B</span> ボム　
+      <span class="kbd">P</span> 一時停止　
+      <span class="kbd">ENTER</span> 開始 / 決定
+      <br>
+      進行演出:
+      ステージ帯ごとに背景色・敵色が変化します。難易度によって敵本体だけでなく、相殺に必要な弾耐久も強化されます。
+      <br>
+      音声:
+      MP3圧縮版BGMを使用（外部MP3差し替え版）
+      <br>
+      開発連携:
+      上の <span class="kbd">設定JSON読込</span> から Dev Kit の JSON を読み込めます
+      <br>
+      <span class="mobilehint">スマホ版:</span>
+      縦持ち推奨 / 画面を指でなぞると自機が少し上へ追従 / ショット自動発射
+      <br>
+      BGM:
+      1〜10 / 11〜20 / 21〜30 / 31〜39 / 40面Final に自動切替
+    </div>
+  </div>
+
+  <script>
+  (() => {
+    const canvas = document.getElementById("gameCanvas");
+    const ctx = canvas.getContext("2d", { alpha: false });
+    const loadConfigBtn = document.getElementById("loadConfigBtn");
+    const resetConfigBtn = document.getElementById("resetConfigBtn");
+    const configFileInput = document.getElementById("configFileInput");
+    loadConfigBtn?.addEventListener("click", () => configFileInput?.click());
+    configFileInput?.addEventListener("change", (e) => {
+      const file = e.target.files?.[0];
+      if (file) loadConfigFromFile(file);
+      e.target.value = "";
+    });
+    resetConfigBtn?.addEventListener("click", () => {
+      gameConfig = cloneDefaultConfig();
+      updateConfigStatus("デフォルト設定");
+      render();
+    });
+
+    const GAME = {
+      INTRO: "intro",
+      TITLE: "title",
+      PLAYING: "playing",
+      PAUSED: "paused",
+      BOSS: "boss",
+      CLEAR: "clear",
+      ENDING: "ending",
+      GAME_OVER: "gameover"
+    };
+    const MAX_STAGE = 40;
+    const EFFECT_DURATION = 40;
+    const INTRO_DURATION = 35;
+    const INTRO_SKIP_FADE = 0.25;
+
+    const DIFFICULTIES = [
+      { key: "easy", label: "EASY", enemyFireMul: 1.35, enemyBulletSpeed: 0.72, enemyHpMul: 0.85, bulletHpMul: 0.8, spawnMul: 1.18, bossHpMul: 0.82, playerFireMul: 0.92, pickupMul: 1.45 },
+      { key: "normal", label: "NORMAL", enemyFireMul: 1.0, enemyBulletSpeed: 1.0, enemyHpMul: 1.0, bulletHpMul: 1.0, spawnMul: 1.0, bossHpMul: 1.0, playerFireMul: 1.0, pickupMul: 1.0 },
+      { key: "hard", label: "HARD", enemyFireMul: 0.82, enemyBulletSpeed: 1.15, enemyHpMul: 1.22, bulletHpMul: 1.4, spawnMul: 0.9, bossHpMul: 1.2, playerFireMul: 1.06, pickupMul: 0.85 }
+    ];
+
+    const STAGE_THEMES = [
+      {
+        name: "DEEP SPACE",
+        bgTop: "#13203d", bgMid: "#090d18", bgBottom: "#040507",
+        lineA: "rgba(103,232,249,0.05)", lineB: "rgba(255,255,255,0.015)",
+        starsA: "#dbeafe", starsB: "#94a3b8",
+        enemySmall: "#fb7185", enemyGunner: "#f59e0b", enemyZigzag: "#a78bfa", boss: "#ef4444"
+      },
+      {
+        name: "NEBULA",
+        bgTop: "#351b4d", bgMid: "#170f2d", bgBottom: "#06050c",
+        lineA: "rgba(192,132,252,0.05)", lineB: "rgba(255,255,255,0.015)",
+        starsA: "#f5d0fe", starsB: "#c4b5fd",
+        enemySmall: "#f472b6", enemyGunner: "#fb7185", enemyZigzag: "#c084fc", boss: "#a855f7"
+      },
+      {
+        name: "CRIMSON ZONE",
+        bgTop: "#4a1414", bgMid: "#220c0c", bgBottom: "#080404",
+        lineA: "rgba(251,113,133,0.06)", lineB: "rgba(255,255,255,0.015)",
+        starsA: "#fecaca", starsB: "#fca5a5",
+        enemySmall: "#fb7185", enemyGunner: "#f97316", enemyZigzag: "#ef4444", boss: "#dc2626"
+      },
+      {
+        name: "TOXIC CIRCUIT",
+        bgTop: "#143d25", bgMid: "#0b1e14", bgBottom: "#040705",
+        lineA: "rgba(74,222,128,0.05)", lineB: "rgba(255,255,255,0.015)",
+        starsA: "#bbf7d0", starsB: "#86efac",
+        enemySmall: "#34d399", enemyGunner: "#84cc16", enemyZigzag: "#4ade80", boss: "#16a34a"
+      },
+      {
+        name: "VOID CORE",
+        bgTop: "#1d1a52", bgMid: "#0d0c23", bgBottom: "#03030a",
+        lineA: "rgba(96,165,250,0.05)", lineB: "rgba(255,255,255,0.015)",
+        starsA: "#bfdbfe", starsB: "#93c5fd",
+        enemySmall: "#60a5fa", enemyGunner: "#38bdf8", enemyZigzag: "#818cf8", boss: "#6366f1"
+      }
+    ];
+
+    const DEFAULT_GAME_CONFIG = {
+    "stages": [
+        {
+            "id": 1,
+            "name": "OPENING GATE",
+            "chapter": 1,
+            "boss": false,
+            "theme": "DEEP SPACE",
+            "bgm": "Main Route BGM",
+            "note": "通常道中ステージ",
+            "bossName": "ルミベル・リボン",
+            "bossKind": "part"
+        },
+        {
+            "id": 2,
+            "name": "STAR BALLOON WAY",
+            "chapter": 1,
+            "boss": false,
+            "theme": "DEEP SPACE",
+            "bgm": "Main Route BGM",
+            "note": "通常道中ステージ",
+            "bossName": "ルミベル・ランタン",
+            "bossKind": "part"
+        },
+        {
+            "id": 3,
+            "name": "CANDY ORBIT",
+            "chapter": 1,
+            "boss": false,
+            "theme": "DEEP SPACE",
+            "bgm": "Main Route BGM",
+            "note": "通常道中ステージ",
+            "bossName": "ルミベル・ファンファーレ",
+            "bossKind": "part"
+        },
+        {
+            "id": 4,
+            "name": "LUMINA STREET",
+            "chapter": 1,
+            "boss": false,
+            "theme": "DEEP SPACE",
+            "bgm": "Main Route BGM",
+            "note": "通常道中ステージ",
+            "bossName": "ルミベル・ステップ",
+            "bossKind": "part"
+        },
+        {
+            "id": 5,
+            "name": "NEBULA CIRCUS",
+            "chapter": 1,
+            "boss": false,
+            "theme": "NEBULA",
+            "bgm": "Main Route BGM",
+            "note": "通常道中ステージ",
+            "bossName": "ルミベル・スポット",
+            "bossKind": "part"
+        },
+        {
+            "id": 6,
+            "name": "POP COMET RUN",
+            "chapter": 1,
+            "boss": false,
+            "theme": "NEBULA",
+            "bgm": "Main Route BGM",
+            "note": "通常道中ステージ",
+            "bossName": "ルミベル・ガーランド",
+            "bossKind": "part"
+        },
+        {
+            "id": 7,
+            "name": "TWINKLE STATION",
+            "chapter": 1,
+            "boss": false,
+            "theme": "NEBULA",
+            "bgm": "Main Route BGM",
+            "note": "通常道中ステージ",
+            "bossName": "ルミベル・カーテシー",
+            "bossKind": "part"
+        },
+        {
+            "id": 8,
+            "name": "SKY PARADE LINE",
+            "chapter": 1,
+            "boss": false,
+            "theme": "NEBULA",
+            "bgm": "Main Route BGM",
+            "note": "通常道中ステージ",
+            "bossName": "ルミベル・パレード",
+            "bossKind": "part"
+        },
+        {
+            "id": 9,
+            "name": "SPARKLE TERRACE",
+            "chapter": 1,
+            "boss": false,
+            "theme": "CRIMSON ZONE",
+            "bgm": "Main Route BGM",
+            "note": "通常道中ステージ",
+            "bossName": "ルミベル・クラウン",
+            "bossKind": "part"
+        },
+        {
+            "id": 10,
+            "name": "GRAND SHOW DECK",
+            "chapter": 1,
+            "boss": true,
+            "theme": "CRIMSON ZONE",
+            "bgm": "Main Route BGM",
+            "note": "章ボス / Warningあり",
+            "bossName": "星彩演出主任 ルミベル",
+            "bossKind": "core"
+        },
+        {
+            "id": 11,
+            "name": "BACKSTAGE DOCK",
+            "chapter": 2,
+            "boss": false,
+            "theme": "CRIMSON ZONE",
+            "bgm": "Main Route BGM",
+            "note": "通常道中ステージ",
+            "bossName": "カーテンコール・レール",
+            "bossKind": "part"
+        },
+        {
+            "id": 12,
+            "name": "MIRROR TUNNEL",
+            "chapter": 2,
+            "boss": false,
+            "theme": "CRIMSON ZONE",
+            "bgm": "Main Route BGM",
+            "note": "通常道中ステージ",
+            "bossName": "カーテンコール・アーム",
+            "bossKind": "part"
+        },
+        {
+            "id": 13,
+            "name": "MECHANIC ALLEY",
+            "chapter": 2,
+            "boss": false,
+            "theme": "TOXIC CIRCUIT",
+            "bgm": "Main Route BGM",
+            "note": "通常道中ステージ",
+            "bossName": "カーテンコール・スプロケット",
+            "bossKind": "part"
+        },
+        {
+            "id": 14,
+            "name": "HIDDEN PROMENADE",
+            "chapter": 2,
+            "boss": false,
+            "theme": "TOXIC CIRCUIT",
+            "bgm": "Main Route BGM",
+            "note": "通常道中ステージ",
+            "bossName": "カーテンコール・ライトリグ",
+            "bossKind": "part"
+        },
+        {
+            "id": 15,
+            "name": "SILENT CAROUSEL",
+            "chapter": 2,
+            "boss": false,
+            "theme": "TOXIC CIRCUIT",
+            "bgm": "Main Route BGM",
+            "note": "通常道中ステージ",
+            "bossName": "カーテンコール・シャッター",
+            "bossKind": "part"
+        },
+        {
+            "id": 16,
+            "name": "CONTROL PASSAGE",
+            "chapter": 2,
+            "boss": false,
+            "theme": "TOXIC CIRCUIT",
+            "bgm": "Main Route BGM",
+            "note": "通常道中ステージ",
+            "bossName": "カーテンコール・クレーン",
+            "bossKind": "part"
+        },
+        {
+            "id": 17,
+            "name": "DARK RIBBON ROAD",
+            "chapter": 2,
+            "boss": false,
+            "theme": "VOID CORE",
+            "bgm": "Main Route BGM",
+            "note": "通常道中ステージ",
+            "bossName": "カーテンコール・ハーネス",
+            "bossKind": "part"
+        },
+        {
+            "id": 18,
+            "name": "PHANTOM PLATFORM",
+            "chapter": 2,
+            "boss": false,
+            "theme": "VOID CORE",
+            "bgm": "Main Route BGM",
+            "note": "通常道中ステージ",
+            "bossName": "カーテンコール・ギアボックス",
+            "bossKind": "part"
+        },
+        {
+            "id": 19,
+            "name": "BROKEN THEATER",
+            "chapter": 2,
+            "boss": false,
+            "theme": "VOID CORE",
+            "bgm": "Main Route BGM",
+            "note": "通常道中ステージ",
+            "bossName": "カーテンコール・コントローラ",
+            "bossKind": "part"
+        },
+        {
+            "id": 20,
+            "name": "MASTER GATE",
+            "chapter": 2,
+            "boss": true,
+            "theme": "VOID CORE",
+            "bgm": "Main Route BGM",
+            "note": "章ボス / Warningあり",
+            "bossName": "舞台裏監督機 カーテンコール",
+            "bossKind": "core"
+        },
+        {
+            "id": 21,
+            "name": "REVERSE PARADE",
+            "chapter": 3,
+            "boss": false,
+            "theme": "DEEP SPACE",
+            "bgm": "Loop 2 BGM",
+            "note": "通常道中ステージ",
+            "bossName": "ノクス・マーチ・マスク",
+            "bossKind": "part"
+        },
+        {
+            "id": 22,
+            "name": "CRACKED ORBIT",
+            "chapter": 3,
+            "boss": false,
+            "theme": "DEEP SPACE",
+            "bgm": "Loop 2 BGM",
+            "note": "通常道中ステージ",
+            "bossName": "ノクス・マーチ・バトン",
+            "bossKind": "part"
+        },
+        {
+            "id": 23,
+            "name": "GLITCH NEBULA",
+            "chapter": 3,
+            "boss": false,
+            "theme": "DEEP SPACE",
+            "bgm": "Loop 2 BGM",
+            "note": "通常道中ステージ",
+            "bossName": "ノクス・マーチ・ノクターン",
+            "bossKind": "part"
+        },
+        {
+            "id": 24,
+            "name": "CHAOS SPANGLE",
+            "chapter": 3,
+            "boss": false,
+            "theme": "DEEP SPACE",
+            "bgm": "Loop 2 BGM",
+            "note": "通常道中ステージ",
+            "bossName": "ノクス・マーチ・ミラー",
+            "bossKind": "part"
+        },
+        {
+            "id": 25,
+            "name": "ZERO LIGHT AVENUE",
+            "chapter": 3,
+            "boss": false,
+            "theme": "NEBULA",
+            "bgm": "Loop 2 BGM",
+            "note": "通常道中ステージ",
+            "bossName": "ノクス・マーチ・エコー",
+            "bossKind": "part"
+        },
+        {
+            "id": 26,
+            "name": "RUINED MARCH",
+            "chapter": 3,
+            "boss": false,
+            "theme": "NEBULA",
+            "bgm": "Loop 2 BGM",
+            "note": "通常道中ステージ",
+            "bossName": "ノクス・マーチ・ララバイ",
+            "bossKind": "part"
+        },
+        {
+            "id": 27,
+            "name": "NOISE PROCESSION",
+            "chapter": 3,
+            "boss": false,
+            "theme": "NEBULA",
+            "bgm": "Loop 2 BGM",
+            "note": "通常道中ステージ",
+            "bossName": "ノクス・マーチ・スコア",
+            "bossKind": "part"
+        },
+        {
+            "id": 28,
+            "name": "HOLLOW FANTASIA",
+            "chapter": 3,
+            "boss": false,
+            "theme": "NEBULA",
+            "bgm": "Loop 2 BGM",
+            "note": "通常道中ステージ",
+            "bossName": "ノクス・マーチ・リフレイン",
+            "bossKind": "part"
+        },
+        {
+            "id": 29,
+            "name": "FALLEN SHOWTIME",
+            "chapter": 3,
+            "boss": false,
+            "theme": "CRIMSON ZONE",
+            "bgm": "Loop 2 BGM",
+            "note": "通常道中ステージ",
+            "bossName": "ノクス・マーチ・ファントム",
+            "bossKind": "part"
+        },
+        {
+            "id": 30,
+            "name": "ABYSS CARNIVAL",
+            "chapter": 3,
+            "boss": true,
+            "theme": "CRIMSON ZONE",
+            "bgm": "Loop 2 BGM",
+            "note": "章ボス / Warningあり",
+            "bossName": "反転行進指揮者 ノクス・マーチ",
+            "bossKind": "core"
+        },
+        {
+            "id": 31,
+            "name": "CORE ENTRY",
+            "chapter": 4,
+            "boss": false,
+            "theme": "CRIMSON ZONE",
+            "bgm": "Loop 2 BGM",
+            "note": "通常道中ステージ",
+            "bossName": "ハートゼロ・リム",
+            "bossKind": "part"
+        },
+        {
+            "id": 32,
+            "name": "HEART VEIN",
+            "chapter": 4,
+            "boss": false,
+            "theme": "CRIMSON ZONE",
+            "bgm": "Loop 2 BGM",
+            "note": "通常道中ステージ",
+            "bossName": "ハートゼロ・クラウン",
+            "bossKind": "part"
+        },
+        {
+            "id": 33,
+            "name": "MEMORY RAIL",
+            "chapter": 4,
+            "boss": false,
+            "theme": "TOXIC CIRCUIT",
+            "bgm": "Loop 2 BGM",
+            "note": "通常道中ステージ",
+            "bossName": "ハートゼロ・フレーム",
+            "bossKind": "part"
+        },
+        {
+            "id": 34,
+            "name": "FALSE APPLAUSE",
+            "chapter": 4,
+            "boss": false,
+            "theme": "TOXIC CIRCUIT",
+            "bgm": "Loop 2 BGM",
+            "note": "通常道中ステージ",
+            "bossName": "ハートゼロ・ヴェイン",
+            "bossKind": "part"
+        },
+        {
+            "id": 35,
+            "name": "LAST PROMENADE",
+            "chapter": 4,
+            "boss": false,
+            "theme": "TOXIC CIRCUIT",
+            "bgm": "Loop 2 BGM",
+            "note": "通常道中ステージ",
+            "bossName": "ハートゼロ・シグナル",
+            "bossKind": "part"
+        },
+        {
+            "id": 36,
+            "name": "COLLAPSE TOWER",
+            "chapter": 4,
+            "boss": false,
+            "theme": "TOXIC CIRCUIT",
+            "bgm": "Loop 2 BGM",
+            "note": "通常道中ステージ",
+            "bossName": "ハートゼロ・オーブ",
+            "bossKind": "part"
+        },
+        {
+            "id": 37,
+            "name": "ZERO ORCHESTRA",
+            "chapter": 4,
+            "boss": false,
+            "theme": "VOID CORE",
+            "bgm": "Loop 2 BGM",
+            "note": "通常道中ステージ",
+            "bossName": "ハートゼロ・ハスク",
+            "bossKind": "part"
+        },
+        {
+            "id": 38,
+            "name": "FINAL SPECTRUM",
+            "chapter": 4,
+            "boss": false,
+            "theme": "VOID CORE",
+            "bgm": "Loop 2 BGM",
+            "note": "通常道中ステージ",
+            "bossName": "ハートゼロ・ゲート",
+            "bossKind": "part"
+        },
+        {
+            "id": 39,
+            "name": "ENDLESS PARADE",
+            "chapter": 4,
+            "boss": false,
+            "theme": "VOID CORE",
+            "bgm": "Loop 2 BGM",
+            "note": "通常道中ステージ",
+            "bossName": "ハートゼロ・コアガード",
+            "bossKind": "part"
+        },
+        {
+            "id": 40,
+            "name": "HEART ZERO",
+            "chapter": 4,
+            "boss": true,
+            "theme": "VOID CORE",
+            "bgm": "Loop 2 BGM",
+            "note": "章ボス / Warningあり",
+            "bossName": "大演出制御核 ハートゼロ",
+            "bossKind": "core"
+        }
+    ],
+    "bosses": [
+        {
+            "id": "lumibelle",
+            "name": "星彩演出主任 ルミベル",
+            "role": "Chapter 1 Boss",
+            "hp": 320,
+            "speed": "中",
+            "forms": [
+                "通常",
+                "第2形態"
+            ],
+            "sprite": "chapter1_boss.png",
+            "note": "笑顔のまま壊れている、華やかな開幕ボス。"
+        },
+        {
+            "id": "curtaincall",
+            "name": "舞台裏監督機 カーテンコール",
+            "role": "Chapter 2 Boss",
+            "hp": 460,
+            "speed": "低〜中",
+            "forms": [
+                "通常",
+                "第2形態"
+            ],
+            "sprite": "chapter2_boss.png",
+            "note": "可愛さの奥に管理機械の圧がある。"
+        },
+        {
+            "id": "noxmarch",
+            "name": "反転行進指揮者 ノクス・マーチ",
+            "role": "Chapter 3 Boss",
+            "hp": 560,
+            "speed": "中",
+            "forms": [
+                "通常",
+                "第2形態"
+            ],
+            "sprite": "chapter3_boss.png",
+            "note": "幻想的で不穏、夢と悪夢の境目。"
+        },
+        {
+            "id": "heartzero",
+            "name": "大演出制御核 ハートゼロ",
+            "role": "Final Boss",
+            "hp": 980,
+            "speed": "可変",
+            "forms": [
+                "通常",
+                "第2形態",
+                "第3形態",
+                "発狂"
+            ],
+            "sprite": "heart_zero_sprite.png",
+            "note": "美しくて哀しい、祝祭そのものが壊れた最後の心臓。"
+        }
+    ],
+    "opening": [
+        {
+            "id": 1,
+            "title": "Cut 1 宇宙導入",
+            "duration": 5,
+            "text": "宇宙最大の移動遊園船団\nギャラクティック・パレード",
+            "visual": "宇宙と遠景の船団シルエット",
+            "skippable": true
+        },
+        {
+            "id": 2,
+            "title": "Cut 2 祝祭の外観",
+            "duration": 5,
+            "text": "星々を巡り、\n光と音と夢を届ける、銀河の祝祭。",
+            "visual": "観覧車、ネオン、光路",
+            "skippable": true
+        },
+        {
+            "id": 3,
+            "title": "Cut 3 平和なショー",
+            "duration": 5,
+            "text": "すべては、笑顔のために。",
+            "visual": "可愛いマスコットと花火",
+            "skippable": true
+        },
+        {
+            "id": 4,
+            "title": "Cut 4 異変",
+            "duration": 5,
+            "text": "だが今、そのショーは暴走し、\n狂騒の舞台へと変わった。",
+            "visual": "ノイズ、警告灯、グリッチ",
+            "skippable": true
+        },
+        {
+            "id": 5,
+            "title": "Cut 5 脅威の提示",
+            "duration": 5,
+            "text": "マスコット兵器、ショー制御AI、巨大ボス群を突破し、\n船団中枢“ハートゼロ”を停止せよ。",
+            "visual": "ボス影、敵弾、危険演出",
+            "skippable": true
+        },
+        {
+            "id": 6,
+            "title": "Cut 6 ヒカリ",
+            "duration": 5,
+            "text": "保安隊の若きパイロット、ヒカリ。\n最後の出撃が始まる。",
+            "visual": "格納庫、主人公機、ヒカリの横顔",
+            "skippable": true
+        },
+        {
+            "id": 7,
+            "title": "Cut 7 発進",
+            "duration": 3,
+            "text": "終わらないパレードに、幕を下ろせ。",
+            "visual": "カタパルト射出",
+            "skippable": true
+        },
+        {
+            "id": 8,
+            "title": "Cut 8 ロゴ",
+            "duration": 2,
+            "text": "GALACTIC PARADE",
+            "visual": "ロゴとサブコピー",
+            "skippable": true
+        }
+    ],
+    "text": {
+        "titleJa": "ギャラクティック・パレード",
+        "titleEn": "GALACTIC PARADE",
+        "mainText": "宇宙最大の移動遊園船団\nギャラクティック・パレードが暴走した。\n\nマスコット兵器、ショー制御AI、巨大ボス群を突破し、\n船団中枢“ハートゼロ”を停止せよ。",
+        "tagline1": "Beyond the smile, the parade has gone mad.",
+        "tagline2": "Stop the endless parade.",
+        "storeLine": "暴走した宇宙遊園船団を舞台にした、ポップで過激な弾幕シューティング。",
+        "heartZeroFormal": "大演出制御核 ハートゼロ"
+    }
+};
+    let gameConfig = JSON.parse(JSON.stringify(DEFAULT_GAME_CONFIG));
+
+    function cloneDefaultConfig() {
+      return JSON.parse(JSON.stringify(DEFAULT_GAME_CONFIG));
+    }
+    function getTextConfig() {
+      return gameConfig.text || DEFAULT_GAME_CONFIG.text || {};
+    }
+    function getStageConfig(stageNumber) {
+      const fromActive = Array.isArray(gameConfig.stages) ? gameConfig.stages.find((s) => s.id === stageNumber) : null;
+      if (fromActive) return fromActive;
+      return Array.isArray(DEFAULT_GAME_CONFIG.stages) ? DEFAULT_GAME_CONFIG.stages.find((s) => s.id === stageNumber) : null;
+    }
+    function getBossConfigForStage(stageNumber) {
+      const stageCfg = getStageConfig(stageNumber) || {};
+      const chapter = Math.min(4, Math.max(1, Math.ceil(stageNumber / 10)));
+      const idx = chapter - 1;
+      const active = Array.isArray(gameConfig.bosses) ? gameConfig.bosses[idx] : null;
+      const fallback = Array.isArray(DEFAULT_GAME_CONFIG.bosses) ? DEFAULT_GAME_CONFIG.bosses[idx] : null;
+      const base = active || fallback || null;
+      if (!base) return null;
+      return { ...base, ...(stageCfg.bossName ? { name: stageCfg.bossName } : {}) };
+    }
+    function getIntroCuts() {
+      return Array.isArray(gameConfig.opening) && gameConfig.opening.length ? gameConfig.opening : DEFAULT_GAME_CONFIG.opening;
+    }
+    function getIntroTotalDuration() {
+      const total = getIntroCuts().reduce((sum, cut) => sum + (Number(cut.duration) || 0), 0);
+      return total > 0 ? total : INTRO_DURATION;
+    }
+    function getIntroCutState(time) {
+      const cuts = getIntroCuts();
+      let acc = 0;
+      for (let i = 0; i < cuts.length; i++) {
+        const dur = Number(cuts[i].duration) || 5;
+        if (time < acc + dur || i === cuts.length - 1) {
+          return {
+            index: i,
+            cut: cuts[i],
+            local: dur > 0 ? Math.max(0, Math.min(1, (time - acc) / dur)) : 0
+          };
+        }
+        acc += dur;
+      }
+      return { index: 0, cut: cuts[0], local: 0 };
+    }
+    function updateConfigStatus(text) {
+      const el = document.getElementById("configStatus");
+      if (el) el.textContent = text;
+    }
+    function applyConfigObject(obj) {
+      if (!obj || typeof obj !== "object") return false;
+      const next = cloneDefaultConfig();
+      if (Array.isArray(obj.stages) && obj.stages.length) next.stages = obj.stages;
+      if (Array.isArray(obj.bosses) && obj.bosses.length) next.bosses = obj.bosses;
+      if (Array.isArray(obj.opening) && obj.opening.length) next.opening = obj.opening;
+      if (obj.text && typeof obj.text === "object") next.text = { ...next.text, ...obj.text };
+      gameConfig = next;
+      updateConfigStatus("設定JSON適用済み");
+      return true;
+    }
+    function loadConfigFromFile(file) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const parsed = JSON.parse(reader.result);
+          if (applyConfigObject(parsed)) {
+            if (state === GAME.INTRO) {
+              introTime = 0;
+            }
+            if (state === GAME.TITLE) {
+              refreshBgmForState();
+            }
+            render();
+          }
+        } catch (err) {
+          alert("設定JSONの読み込みに失敗しました。");
+        }
+      };
+      reader.readAsText(file);
+    }
+
+
+    const PICKUP_COLORS = {
+      heal: "#4ade80", bomb: "#facc15", wide: "#60a5fa", side: "#c084fc", rapid: "#fb7185", shield: "#67e8f9", beam: "#f59e0b", drone: "#22d3ee"
+    };
+
+    let state = GAME.TITLE;
+    let lastTime = 0, elapsed = 0, score = 0, level = 1, stage = 1;
+    let highScore = Number(localStorage.getItem("pixel_shooting_highscore_v8") || 0);
+    let combo = 0, comboTimer = 0, shake = 0, clearTimer = 0, endingTimer = 0, introTime = 0, introSkipFade = 0, introSkipping = false, stageIntroTimer = 0, bossWarningTimer = 0, bossWarningIssued = false;
+    let bossSpawnedForStage = false, audioUnlocked = false, difficultyIndex = 0, bgmEnabled = true;
+    let selectedTitleButton = 0, enemySpawnTimer = 0, enemySpawnInterval = 0.95, nextBossTime = 24, boss = null, currentBgm = "none";
+    let bgmVolume = 0.42, seVolume = 0.70;
+
+    const keys = Object.create(null);
+    const codes = Object.create(null);
+    let stars = [], bullets = [], enemyBullets = [], enemies = [], particles = [], pickups = [];
+
+    const player = {
+      x: 270, y: 760, width: 20, height: 22, speed: 245, focusSpeed: 140,
+      hp: 7, maxHp: 7, fireCooldown: 0, fireInterval: 0.105, invincible: 0, bomb: 2,
+      wideLevel: 0, sideLevel: 0, rapidLevel: 0, shield: 0, beamLevel: 0, droneLevel: 0,
+      wideTimer: 0, sideTimer: 0, rapidTimer: 0, shieldTimer: 0, beamTimer: 0, droneTimer: 0
+    };
+
+    const touch = {
+      followActive: false, followId: null, pointerX: 270, pointerY: 820,
+      targetX: 270, targetY: 760, fireActive: false, fireId: null
+    };
+
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const bgmTracks = {
+      road_1_10: new Audio("./bgm/fight_1~10.mp3"),
+      boss_1_10: new Audio("./bgm/boss_1~10.mp3"),
+      road_11_20: new Audio("./bgm/fight_11~20.mp3"),
+      boss_11_20: new Audio("./bgm/boss_11~20.mp3"),
+      road_21_30: new Audio("./bgm/fight_21~30.mp3"),
+      boss_21_30: new Audio("./bgm/boss_21~30.mp3"),
+      road_31_39: new Audio("./bgm/fight_31~40.mp3"),
+      boss_31_39: new Audio("./bgm/boss_31~39.mp3"),
+      boss_40: new Audio("./bgm/Finalboss.mp3")
+    };
+    Object.values(bgmTracks).forEach(a => {
+      a.loop = true; a.volume = bgmVolume; a.preload = "auto"; a.playsInline = true;
+    });
+
+    const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+    const rand = (min, max) => min + Math.random() * (max - min);
+    const randInt = (min, max) => Math.floor(rand(min, max + 1));
+    const currentDiff = () => DIFFICULTIES[difficultyIndex];
+    const currentThemeIndex = () => Math.floor((stage - 1) / 4) % STAGE_THEMES.length;
+    const currentTheme = () => STAGE_THEMES[currentThemeIndex()];
+    const currentLoop = () => stage > 20 ? 2 : 1;
+    const currentBossTier = () => Math.min(4, Math.floor((stage - 1) / 10) + 1);
+    const scaleEnemyHP = (base) => Math.max(1, Math.round(base * currentDiff().enemyHpMul));
+    const scaleBulletHP = (base) => Math.max(1, Math.round(base * currentDiff().bulletHpMul));
+
+    function currentRoadBgm() {
+      if (stage <= 10) return bgmTracks.road_1_10;
+      if (stage <= 20) return bgmTracks.road_11_20;
+      if (stage <= 30) return bgmTracks.road_21_30;
+      return bgmTracks.road_31_39;
+    }
+    function currentBossBgm() {
+      if (stage <= 10) return bgmTracks.boss_1_10;
+      if (stage <= 20) return bgmTracks.boss_11_20;
+      if (stage <= 30) return bgmTracks.boss_21_30;
+      if (stage <= 39) return bgmTracks.boss_31_39;
+      return bgmTracks.boss_40;
+    }
+    function applyAudioVolumes() { Object.values(bgmTracks).forEach(a => a.volume = bgmVolume); }
+    function pauseBgm(audio) { try { audio.pause(); } catch (e) {} }
+    function setBgm(mode) {
+      const key = mode + "_" + stage;
+      if (!audioUnlocked || !bgmEnabled) mode = "none";
+      const effectiveKey = mode === "none" ? "none" : key;
+      if (currentBgm === effectiveKey) return;
+      currentBgm = effectiveKey;
+      Object.values(bgmTracks).forEach(pauseBgm);
+      if (mode === "road") { try { const a = currentRoadBgm(); a.currentTime = 0; a.play().catch(()=>{}); } catch (e) {} }
+      else if (mode === "boss") { try { const a = currentBossBgm(); a.currentTime = 0; a.play().catch(()=>{}); } catch (e) {} }
+    }
+    function refreshBgmForState() {
+      if (state === GAME.BOSS && boss) setBgm("boss");
+      else if (state === GAME.PLAYING) setBgm("road");
+      else setBgm("none");
+    }
+    function unlockAudio() {
+      if (!audioUnlocked) {
+        audioUnlocked = true;
+        if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+      }
+      applyAudioVolumes();
+      refreshBgmForState();
+    }
+    function beep(freq = 440, duration = 0.08, volume = 0.03, type = "square", slide = 0) {
+      if (!audioUnlocked) return;
+      const v = volume * seVolume;
+      if (v <= 0.0005) return;
+      const t = audioCtx.currentTime;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = type;
+      osc.frequency.setValueAtTime(freq, t);
+      if (slide) osc.frequency.linearRampToValueAtTime(Math.max(20, freq + slide * 1000), t + duration);
+      gain.gain.setValueAtTime(0.0001, t);
+      gain.gain.exponentialRampToValueAtTime(v, t + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + duration);
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start(t); osc.stop(t + duration + 0.02);
+    }
+    function noiseBurst(duration = 0.1, volume = 0.04, lowpass = 1500) {
+      if (!audioUnlocked) return;
+      const v = volume * seVolume;
+      if (v <= 0.0005) return;
+      const buffer = audioCtx.createBuffer(1, Math.max(1, Math.floor(audioCtx.sampleRate * duration)), audioCtx.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+      const src = audioCtx.createBufferSource();
+      const filter = audioCtx.createBiquadFilter();
+      const gain = audioCtx.createGain();
+      filter.type = "lowpass"; filter.frequency.value = lowpass; src.buffer = buffer;
+      const t = audioCtx.currentTime;
+      gain.gain.setValueAtTime(v, t);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + duration);
+      src.connect(filter).connect(gain).connect(audioCtx.destination);
+      src.start(t); src.stop(t + duration + 0.02);
+    }
+
+    function initStars() {
+      stars = [];
+      for (let i = 0; i < 72; i++) stars.push({ x: Math.random() * canvas.width, y: Math.random() * canvas.height, size: Math.random() < 0.7 ? 2 : 3, speed: 30 + Math.random() * 70 });
+    }
+    function resetPlayerPowers() {
+      player.wideLevel = 0; player.sideLevel = 0; player.rapidLevel = 0; player.shield = 0; player.beamLevel = 0; player.droneLevel = 0;
+      player.wideTimer = 0; player.sideTimer = 0; player.rapidTimer = 0; player.shieldTimer = 0; player.beamTimer = 0; player.droneTimer = 0;
+    }
+    function updateTimedPowers(delta) {
+      const timed = [
+        ["wideLevel", "wideTimer"],
+        ["sideLevel", "sideTimer"],
+        ["rapidLevel", "rapidTimer"],
+        ["shield", "shieldTimer"],
+        ["beamLevel", "beamTimer"],
+        ["droneLevel", "droneTimer"]
+      ];
+      for (const [levelKey, timerKey] of timed) {
+        if (player[timerKey] > 0) {
+          player[timerKey] = Math.max(0, player[timerKey] - delta);
+          if (player[timerKey] === 0) player[levelKey] = 0;
+        }
+      }
+    }
+    function effectTimeText(level, timer) {
+      return level > 0 && timer > 0 ? ("x" + level + " " + Math.ceil(timer) + "s") : "--";
+    }
+    function resetRun() {
+      elapsed = 0; score = 0; level = 1; stage = 1; combo = 0; comboTimer = 0; shake = 0; clearTimer = 0; endingTimer = 0; stageIntroTimer = 2.4; bossWarningTimer = 0; bossWarningIssued = false;
+      bossSpawnedForStage = false; nextBossTime = 24; boss = null; bullets = []; enemyBullets = []; enemies = []; particles = []; pickups = [];
+      enemySpawnTimer = 0; enemySpawnInterval = 0.95 * currentDiff().spawnMul;
+      player.x = 450; player.y = 520; player.hp = player.maxHp; player.fireCooldown = 0; player.invincible = 1.0; player.bomb = 2; resetPlayerPowers();
+      initStars();
+    }
+    function skipIntro() {
+      if (state !== GAME.INTRO) return;
+      introSkipping = true;
+    }
+    function startGame() {
+      unlockAudio();
+      if (state === GAME.TITLE || state === GAME.GAME_OVER || state === GAME.CLEAR || state === GAME.ENDING) {
+        resetRun(); state = GAME.PLAYING; refreshBgmForState();
+      } else if (state === GAME.PAUSED) {
+        state = boss ? GAME.BOSS : GAME.PLAYING; refreshBgmForState();
+      }
+    }
+    function returnToTitle() {
+      state = GAME.TITLE;
+      boss = null; enemies = []; bullets = []; enemyBullets = []; pickups = []; particles = []; stageIntroTimer = 0; bossWarningTimer = 0; bossWarningIssued = false;
+      introTime = 0; introSkipFade = 0; introSkipping = false;
+      touch.followActive = false; touch.followId = null; updateTouchPads();
+      refreshBgmForState();
+    }
+    function togglePause() {
+      if (state === GAME.PLAYING || state === GAME.BOSS) { state = GAME.PAUSED; refreshBgmForState(); }
+      else if (state === GAME.PAUSED) { state = boss ? GAME.BOSS : GAME.PLAYING; refreshBgmForState(); }
+    }
+    function rectsOverlap(a, b) {
+      return a.x - a.width / 2 < b.x + b.width / 2 && a.x + a.width / 2 > b.x - b.width / 2 &&
+             a.y - a.height / 2 < b.y + b.height / 2 && a.y + a.height / 2 > b.y - b.height / 2;
+    }
+    function addParticle(x, y, color = "#fff", amount = 12, power = 120, size = 3) {
+      for (let i = 0; i < amount; i++) {
+        const a = Math.random() * Math.PI * 2, s = Math.random() * power;
+        particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 0.25 + Math.random() * 0.45, maxLife: 0.7, color, size: Math.max(1, Math.round(Math.random() * size)) });
+      }
+    }
+    function addTextParticle(x, y, text, color) {
+      particles.push({ x, y, vx: 0, vy: -18, life: 0.7, maxLife: 0.7, color, size: 0, text, textMode: true });
+    }
+    function addDefeatFace(x, y, color, kind) {
+      particles.push({ x, y, vx: 0, vy: -26, life: 0.42, maxLife: 0.42, color, kind, deadFace: true, size: 0 });
+    }
+    function spawnPlayerBullet(x, y, vx, vy, damage, color = "#fde68a", type = "player") {
+  const width = type === "beam" ? 6 : (type === "drone" ? 6 : 4);
+  const height = type === "beam" ? 18 : (type === "drone" ? 6 : 10);
+  bullets.push({ x, y, width, height, vx, vy, damage, color, type });
+}
+    function playerShoot() {
+  const x = player.x, y = player.y - 14;
+  spawnPlayerBullet(x, y, 0, -430, 1);
+  spawnPlayerBullet(x - 8, y + 3, -28, -390, 1);
+  spawnPlayerBullet(x + 8, y + 3, 28, -390, 1);
+
+  if (player.wideLevel >= 1) {
+    spawnPlayerBullet(x - 16, y + 5, -90, -355, 1, "#60a5fa");
+    spawnPlayerBullet(x + 16, y + 5, 90, -355, 1, "#60a5fa");
+  }
+  if (player.wideLevel >= 2) {
+    spawnPlayerBullet(x - 24, y + 8, -130, -320, 1, "#60a5fa");
+    spawnPlayerBullet(x + 24, y + 8, 130, -320, 1, "#60a5fa");
+  }
+  if (player.sideLevel >= 1) {
+    spawnPlayerBullet(x - 12, y, -270, -90, 1, "#c084fc", "side");
+    spawnPlayerBullet(x + 12, y, 270, -90, 1, "#c084fc", "side");
+  }
+  if (player.sideLevel >= 2) {
+    spawnPlayerBullet(x - 6, y + 8, -310, 15, 1, "#c084fc", "side");
+    spawnPlayerBullet(x + 6, y + 8, 310, 15, 1, "#c084fc", "side");
+  }
+
+  if (stage >= 21 && player.beamLevel >= 1) {
+    spawnPlayerBullet(x, y - 6, 0, -520, 2, "#f59e0b", "beam");
+  }
+  if (stage >= 21 && player.beamLevel >= 2) {
+    spawnPlayerBullet(x - 10, y - 2, -20, -500, 2, "#fbbf24", "beam");
+    spawnPlayerBullet(x + 10, y - 2, 20, -500, 2, "#fbbf24", "beam");
+  }
+  if (stage >= 21 && player.droneLevel >= 1) {
+    spawnPlayerBullet(x - 18, y + 2, -120, -280, 1, "#22d3ee", "drone");
+    spawnPlayerBullet(x + 18, y + 2, 120, -280, 1, "#22d3ee", "drone");
+  }
+  if (stage >= 21 && player.droneLevel >= 2) {
+    spawnPlayerBullet(x - 24, y + 10, -180, -240, 1, "#67e8f9", "drone");
+    spawnPlayerBullet(x + 24, y + 10, 180, -240, 1, "#67e8f9", "drone");
+  }
+
+  beep(860, 0.04, 0.022, "square", -0.25);
+}
+    function makeEnemyBullet(x, y, angle, speed, type = "normal", hp = 1) {
+      const speedMul = currentDiff().enemyBulletSpeed;
+      enemyBullets.push({
+        x, y,
+        width: type === "big" ? 8 : type === "needle" ? 4 : 6,
+        height: type === "big" ? 8 : type === "needle" ? 12 : 6,
+        vx: Math.cos(angle) * speed * speedMul,
+        vy: Math.sin(angle) * speed * speedMul,
+        type,
+        hp: scaleBulletHP(hp)
+      });
+    }
+    function aimAtPlayer(fromX, fromY) { return Math.atan2(player.y - fromY, player.x - fromX); }
+    function spawnEnemy() {
+      const theme = currentTheme(), r = Math.random();
+      if (r < 0.56) enemies.push({ kind: "small", x: rand(30, 870), y: -30, width: 18, height: 18, hp: scaleEnemyHP(2), maxHp: scaleEnemyHP(2), score: 12, vx: rand(-18, 18), vy: rand(68, 98) + level * 1.4, fireTimer: rand(1.4, 2.2) * currentDiff().enemyFireMul, color: theme.enemySmall });
+      else if (r < 0.88) enemies.push({ kind: "gunner", x: rand(40, 860), y: -36, width: 22, height: 22, hp: scaleEnemyHP(3), maxHp: scaleEnemyHP(3), score: 22, vx: rand(-14, 14), vy: rand(46, 70) + level * 1.5, fireTimer: rand(1.5, 2.4) * currentDiff().enemyFireMul, color: theme.enemyGunner });
+      else enemies.push({ kind: "zigzag", x: rand(40, 860), y: -40, width: 24, height: 24, hp: scaleEnemyHP(5), maxHp: scaleEnemyHP(5), score: 35, vx: Math.random() < 0.5 ? -84 : 84, vy: 42 + level * 1.3, fireTimer: rand(1.2, 2.0) * currentDiff().enemyFireMul, color: theme.enemyZigzag });
+    }
+    function spawnBoss() {
+  const bossCfg = getBossConfigForStage(stage);
+  const baseBossHp = bossCfg && bossCfg.hp ? Number(bossCfg.hp) : (170 + (stage - 1) * 45);
+  const hp = Math.round(baseBossHp * currentDiff().bossHpMul);
+  const tier = currentBossTier();
+  boss = {
+    x: 450, y: -180, targetY: stage === MAX_STAGE ? 132 : 110, entrySpeed: stage === MAX_STAGE ? 92 : 85,
+    width: stage === MAX_STAGE ? 150 : (tier >= 3 ? 122 : 112), height: stage === MAX_STAGE ? 130 : (tier >= 3 ? 78 : 72),
+    hp, maxHp: hp, vx: 70 + stage * 4,
+    fireTimer: 1.25, spreadTimer: 2.9, summonTimer: 5.2,
+    sniperTimer: Math.max(2.8, 4.4 - stage * 0.12),
+    waveTimer: Math.max(2.4, 4.1 - stage * 0.08),
+    rainTimer: Math.max(3.0, 5.0 - stage * 0.1),
+    spiralTimer: tier >= 3 ? Math.max(2.0, 4.2 - stage * 0.08) : 999,
+    sweepTimer: tier >= 3 ? Math.max(2.2, 4.6 - stage * 0.06) : 999,
+    crossTimer: tier >= 4 ? Math.max(2.3, 4.8 - stage * 0.06) : 999,
+    phase: 1, thirdForm: false, enraged: false, tier,
+    entering: true, isHeartZero: stage === MAX_STAGE
+  };
+  enemies = []; enemyBullets = []; bossSpawnedForStage = true; bossWarningIssued = true; bossWarningTimer = 2.4; state = GAME.BOSS;
+  addTextParticle(450, 240, tier >= 3 ? "WARNING - NEO BOSS" : "WARNING!!", "#ffcf4d");
+  noiseBurst(0.18, 0.06, 900); beep(140, 0.22, 0.035, "sawtooth", 0.03);
+  refreshBgmForState();
+}
+    function spawnPickup(x, y, forced = null) {
+  let type = forced;
+  if (!type) {
+    const pickupMul = currentDiff().pickupMul;
+    const pool = [
+      {type:"heal",weight:14*pickupMul},{type:"bomb",weight:10*pickupMul},
+      {type:"wide",weight:9},{type:"side",weight:8},{type:"rapid",weight:10},{type:"shield",weight:8}
+    ];
+    if (stage >= 21) {
+      pool.push({type:"beam",weight:8},{type:"drone",weight:7});
+    }
+    let r = Math.random() * pool.reduce((s,p)=>s+p.weight,0);
+    for (const p of pool) { r -= p.weight; if (r <= 0) { type = p.type; break; } }
+  }
+  if (!type) return;
+  pickups.push({ type, x, y, width: 14, height: 14, vy: 70, t: 0 });
+}
+    function destroyEnemy(idx) {
+      const e = enemies[idx]; if (!e) return;
+      score += e.score + Math.min(combo * 2, 80); combo++; comboTimer = 1.55;
+      addParticle(e.x, e.y, e.color, 16, 120, 3); addDefeatFace(e.x, e.y - 4, e.color, e.kind); noiseBurst(0.06, 0.025, 1200);
+      if (Math.random() < 0.22) spawnPickup(e.x, e.y);
+      enemies.splice(idx, 1);
+    }
+    function bombClear() {
+      if (player.bomb <= 0 || !(state === GAME.PLAYING || state === GAME.BOSS)) return;
+      player.bomb--; let gained = 0;
+      for (let i = enemies.length - 1; i >= 0; i--) { gained += enemies[i].score; addParticle(enemies[i].x, enemies[i].y, "#ffd166", 14, 140, 4); enemies.splice(i, 1); }
+      for (const b of enemyBullets) addParticle(b.x, b.y, "#67e8f9", 4, 40, 2);
+      enemyBullets = [];
+      if (boss && !boss.entering) { boss.hp = Math.max(1, boss.hp - 40); addParticle(boss.x, boss.y, "#ffd166", 26, 160, 5); }
+      score += gained; shake = 8; noiseBurst(0.14, 0.06, 900); beep(220, 0.18, 0.03, "triangle", -0.06);
+    }
+    function triggerGameOver() {
+      state = GAME.GAME_OVER; highScore = Math.max(highScore, score); localStorage.setItem("pixel_shooting_highscore_v8", String(highScore));
+      boss = null; enemies = []; bullets = []; enemyBullets = []; pickups = []; combo = 0; comboTimer = 0; refreshBgmForState(); noiseBurst(0.2, 0.07, 700);
+    }
+    function damagePlayer(amount = 1) {
+      if (player.invincible > 0 || state === GAME.GAME_OVER) return;
+      if (player.shield > 0) {
+        player.shield--; if (player.shield <= 0) player.shieldTimer = 0; player.invincible = 0.45; addTextParticle(player.x, player.y - 20, "SHIELD!", "#67e8f9"); addParticle(player.x, player.y, "#67e8f9", 16, 130, 3); beep(980, 0.06, 0.02, "triangle", 0.03); return;
+      }
+      player.hp -= amount; player.invincible = 1.25; combo = 0; comboTimer = 0; shake = 10;
+      addParticle(player.x, player.y, "#67e8f9", 18, 150, 4); noiseBurst(0.12, 0.055, 800); beep(180, 0.18, 0.03, "sawtooth", -0.08);
+      if (player.hp <= 0) { player.hp = 0; triggerGameOver(); }
+    }
+    function applyPickup(type, x, y) {
+  if (type === "heal") { player.hp = Math.min(player.maxHp, player.hp + 1); addTextParticle(x, y, "HP+", PICKUP_COLORS.heal); beep(720, 0.07, 0.025, "triangle", 0.04); }
+  else if (type === "bomb") { player.bomb = Math.min(4, player.bomb + 1); addTextParticle(x, y, "BOMB+", PICKUP_COLORS.bomb); beep(520, 0.09, 0.025, "square", 0.04); }
+  else if (type === "wide") { player.wideLevel = Math.min(2, player.wideLevel + 1); player.wideTimer = EFFECT_DURATION; addTextParticle(x, y, "WIDE+", PICKUP_COLORS.wide); beep(780, 0.08, 0.023, "square", 0.05); }
+  else if (type === "side") { player.sideLevel = Math.min(2, player.sideLevel + 1); player.sideTimer = EFFECT_DURATION; addTextParticle(x, y, "SIDE+", PICKUP_COLORS.side); beep(640, 0.08, 0.023, "square", 0.05); }
+  else if (type === "rapid") { player.rapidLevel = Math.min(3, player.rapidLevel + 1); player.rapidTimer = EFFECT_DURATION; addTextParticle(x, y, "RAPID+", PICKUP_COLORS.rapid); beep(940, 0.05, 0.022, "square", 0.04); }
+  else if (type === "shield") { player.shield = Math.min(3, player.shield + 1); player.shieldTimer = EFFECT_DURATION; addTextParticle(x, y, "SHIELD+", PICKUP_COLORS.shield); beep(1040, 0.06, 0.02, "triangle", 0.04); }
+  else if (type === "beam") { player.beamLevel = Math.min(2, player.beamLevel + 1); player.beamTimer = EFFECT_DURATION; addTextParticle(x, y, "BEAM+", PICKUP_COLORS.beam); beep(860, 0.08, 0.023, "square", 0.05); }
+  else if (type === "drone") { player.droneLevel = Math.min(2, player.droneLevel + 1); player.droneTimer = EFFECT_DURATION; addTextParticle(x, y, "DRONE+", PICKUP_COLORS.drone); beep(680, 0.08, 0.023, "triangle", 0.05); }
+}
+    function triggerEnding() {
+      state = GAME.ENDING; endingTimer = 0;
+      boss = null; enemies = []; bullets = []; enemyBullets = []; pickups = [];
+      highScore = Math.max(highScore, score); localStorage.setItem("pixel_shooting_highscore_v8", String(highScore));
+      refreshBgmForState();
+      for (let i = 0; i < 3; i++) setTimeout(() => beep(700 + i * 180, 0.16, 0.03, "square", 0.06), i * 160);
+      addTextParticle(450, 250, "MISSION COMPLETE", "#4ade80"); addParticle(450, 260, "#facc15", 50, 200, 5);
+    }
+    function clearStage() {
+      if (stage >= MAX_STAGE) { triggerEnding(); return; }
+      state = GAME.CLEAR; clearTimer = 0; boss = null; enemyBullets = []; enemies = []; pickups = [];
+      stage++; nextBossTime = elapsed + Math.max(20, 24 - stage * 0.2); bossSpawnedForStage = false; bossWarningIssued = false; bossWarningTimer = 0;
+      highScore = Math.max(highScore, score); localStorage.setItem("pixel_shooting_highscore_v8", String(highScore));
+      refreshBgmForState(); beep(520, 0.15, 0.03, "square", 0.06); beep(780, 0.18, 0.03, "square", 0.08); beep(1040, 0.24, 0.03, "square", 0.1);
+    }
+    function advanceFromClear() {
+      if (state !== GAME.CLEAR) return;
+      state = GAME.PLAYING;
+      clearTimer = 0;
+      player.invincible = 1.0;
+      stageIntroTimer = 2.1;
+      bossWarningIssued = false;
+      bossWarningTimer = 0;
+      refreshBgmForState();
+      beep(880, 0.07, 0.02, "square", 0.04);
+    }
+
+    function updateTouchPads() { touch.pointerX = canvas.width * 0.5; touch.pointerY = canvas.height * 0.86; touch.targetX = touch.pointerX; touch.targetY = touch.pointerY - 82; }
+    function getCanvasPos(e) {
+      const rect = canvas.getBoundingClientRect(), scaleX = canvas.width / rect.width, scaleY = canvas.height / rect.height;
+      return { x: (e.clientX - rect.left) * scaleX, y: (e.clientY - rect.top) * scaleY };
+    }
+    function titleButtons() {
+      const w = Math.min(430, canvas.width - 72);
+      const x = (canvas.width - w) / 2;
+      const top = 250;
+      const gap = 84;
+      return [
+        { x, y: top + gap * 0, w, h: 68, type: "difficulty" },
+        { x, y: top + gap * 1, w, h: 68, type: "bgm" },
+        { x, y: top + gap * 2, w, h: 68, type: "bgmVol" },
+        { x, y: top + gap * 3, w, h: 68, type: "seVol" },
+        { x, y: top + gap * 4, w, h: 58, type: "start" },
+      ];
+    }
+    function moveTitleSelection(dir) { selectedTitleButton = (selectedTitleButton + dir + 5) % 5; beep(560, 0.04, 0.014, "square", 0.02); }
+    function adjustSlider(kind, dir) {
+      const step = 0.1 * dir;
+      if (kind === "bgmVol") { bgmVolume = clamp(Math.round((bgmVolume + step) * 10) / 10, 0, 1); applyAudioVolumes(); }
+      else if (kind === "seVol") seVolume = clamp(Math.round((seVolume + step) * 10) / 10, 0, 1);
+      beep(720 + dir * 60, 0.05, 0.018, "square", 0.02);
+    }
+    function handleTitleButton(type, dir = 1) {
+      unlockAudio();
+      if (type === "difficulty") { difficultyIndex = (difficultyIndex + dir + DIFFICULTIES.length) % DIFFICULTIES.length; beep(640, 0.05, 0.02, "square", 0.02); }
+      else if (type === "bgm") { bgmEnabled = !bgmEnabled; refreshBgmForState(); beep(bgmEnabled ? 760 : 260, 0.08, 0.02, "triangle", 0.03); }
+      else if (type === "bgmVol" || type === "seVol") adjustSlider(type, dir);
+      else if (type === "start") startGame();
+    }
+
+    function onPointerDown(e) {
+      const p = getCanvasPos(e);
+      canvas.setPointerCapture?.(e.pointerId);
+      if (state === GAME.TITLE) {
+        const buttons = titleButtons();
+        for (let i = 0; i < buttons.length; i++) {
+          const btn = buttons[i];
+          if (p.x >= btn.x && p.x <= btn.x + btn.w && p.y >= btn.y && p.y <= btn.y + btn.h) {
+            selectedTitleButton = i;
+            if (btn.type === "difficulty") handleTitleButton("difficulty", p.x < btn.x + btn.w / 2 ? -1 : 1);
+            else if (btn.type === "bgmVol" || btn.type === "seVol") {
+              const ratio = clamp((p.x - (btn.x + 24)) / (btn.w - 48), 0, 1);
+              if (btn.type === "bgmVol") { bgmVolume = Math.round(ratio * 10) / 10; applyAudioVolumes(); }
+              else seVolume = Math.round(ratio * 10) / 10;
+              beep(760, 0.05, 0.018, "square", 0.02);
+            } else handleTitleButton(btn.type);
+            return;
+          }
+        }
+        startGame(); return;
+      }
+      if (state === GAME.CLEAR) { advanceFromClear(); return; }
+      if (state === GAME.GAME_OVER || state === GAME.ENDING) { returnToTitle(); return; }
+
+      const bombX = canvas.width - 62, bombY = canvas.height - 76;
+      if (Math.hypot(p.x - bombX, p.y - bombY) < 36) { bombClear(); return; }
+
+      touch.followActive = true;
+      touch.followId = e.pointerId;
+      touch.pointerX = p.x;
+      touch.pointerY = p.y;
+      touch.targetX = p.x;
+      touch.targetY = p.y - 82;
+    }
+    function onPointerMove(e) {
+      const p = getCanvasPos(e);
+      if (touch.followActive && e.pointerId === touch.followId) {
+        touch.pointerX = p.x;
+        touch.pointerY = p.y;
+        touch.targetX = p.x;
+        touch.targetY = p.y - 82;
+      }
+    }
+    function endPointer(pointerId) {
+      if (touch.followActive && pointerId === touch.followId) {
+        touch.followActive = false; touch.followId = null;
+      }
+      if (touch.fireActive && pointerId === touch.fireId) { touch.fireActive = false; touch.fireId = null; }
+    }
+    canvas.addEventListener("pointerdown", onPointerDown);
+    canvas.addEventListener("pointermove", onPointerMove);
+    canvas.addEventListener("pointerup", (e) => endPointer(e.pointerId));
+    canvas.addEventListener("pointercancel", (e) => endPointer(e.pointerId));
+
+    document.addEventListener("keydown", (e) => {
+      const key = (e.key || "").toLowerCase();
+      keys[key] = true;
+      if (e.code) codes[e.code] = true;
+      if (e.code === "Space") e.preventDefault();
+      if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.code)) e.preventDefault();
+
+      if (state === GAME.TITLE) {
+        if (e.code === "ArrowUp") moveTitleSelection(-1);
+        else if (e.code === "ArrowDown") moveTitleSelection(1);
+        else if (e.code === "ArrowLeft") {
+          const btn = titleButtons()[selectedTitleButton];
+          if (btn.type === "difficulty" || btn.type === "bgmVol" || btn.type === "seVol") handleTitleButton(btn.type, -1);
+        } else if (e.code === "ArrowRight") {
+          const btn = titleButtons()[selectedTitleButton];
+          if (btn.type === "difficulty" || btn.type === "bgmVol" || btn.type === "seVol") handleTitleButton(btn.type, 1);
+        } else if (key === "m") handleTitleButton("bgm");
+        else if (e.code === "Enter") handleTitleButton(titleButtons()[selectedTitleButton].type);
+      } else {
+        if (e.code === "Enter" && state === GAME.CLEAR) advanceFromClear();
+        else if (e.code === "Enter" && (state === GAME.GAME_OVER || state === GAME.ENDING)) returnToTitle();
+        else if (e.code === "Enter") startGame();
+        if (key === "p" && state !== GAME.GAME_OVER && state !== GAME.CLEAR && state !== GAME.ENDING) togglePause();
+      }
+      if (key === "b" || key === "x") bombClear();
+      unlockAudio();
+    });
+    document.addEventListener("keyup", (e) => {
+      const key = (e.key || "").toLowerCase();
+      keys[key] = false;
+      if (e.code) codes[e.code] = false;
+    });
+    window.addEventListener("resize", updateTouchPads);
+
+    function update(delta) {
+      for (const s of stars) {
+        s.y += s.speed * delta * ((state === GAME.PLAYING || state === GAME.BOSS) ? 1 : 0.25);
+        if (s.y > canvas.height) { s.y = -4; s.x = Math.random() * canvas.width; }
+      }
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+        p.x += p.vx * delta; p.y += p.vy * delta; p.life -= delta; p.vx *= 0.985; p.vy *= 0.985;
+        if (p.life <= 0) particles.splice(i, 1);
+      }
+      if (stageIntroTimer > 0) stageIntroTimer = Math.max(0, stageIntroTimer - delta);
+      if (bossWarningTimer > 0) bossWarningTimer = Math.max(0, bossWarningTimer - delta);
+
+      if (state === GAME.INTRO) {
+        if (introSkipping) {
+          introSkipFade += delta;
+          if (introSkipFade >= INTRO_SKIP_FADE) {
+            state = GAME.TITLE;
+            introTime = 0;
+            introSkipFade = 0;
+            introSkipping = false;
+          }
+        } else {
+          introTime += delta;
+          if (introTime >= getIntroTotalDuration()) {
+            state = GAME.TITLE;
+            introTime = 0;
+          }
+        }
+        return;
+      }
+
+      if (state === GAME.ENDING) {
+        endingTimer += delta;
+        if (Math.random() < 0.25) addParticle(rand(120, 780), rand(120, 480), ["#facc15","#67e8f9","#fb7185","#4ade80"][randInt(0,3)], 5, 40, 3);
+        if (endingTimer > 7.0) returnToTitle();
+        return;
+      }
+      if (state === GAME.CLEAR) {
+        clearTimer += delta;
+        if (clearTimer > 2.1) { state = GAME.PLAYING; player.invincible = 1.0; refreshBgmForState(); }
+        return;
+      }
+      if (!(state === GAME.PLAYING || state === GAME.BOSS)) return;
+
+      elapsed += delta; level = 1 + Math.floor(elapsed / 18);
+      if (comboTimer > 0) comboTimer -= delta; else combo = 0;
+      if (player.invincible > 0) player.invincible -= delta;
+      if (player.fireCooldown > 0) player.fireCooldown -= delta;
+      updateTimedPowers(delta);
+      if (shake > 0) shake = Math.max(0, shake - delta * 20);
+
+      let mx = 0, my = 0;
+    const leftPressed = !!(codes["ArrowLeft"] || codes["KeyA"]);
+    const rightPressed = !!(codes["ArrowRight"] || codes["KeyD"]);
+    const upPressed = !!(codes["ArrowUp"] || codes["KeyW"]);
+    const downPressed = !!(codes["ArrowDown"] || codes["KeyS"]);
+    if (leftPressed) mx -= 1;
+    if (rightPressed) mx += 1;
+    if (upPressed) my -= 1;
+    if (downPressed) my += 1;
+      const len = Math.hypot(mx, my);
+      if (len > 1) { mx /= len; my /= len; }
+      const speed = keys["shift"] ? player.focusSpeed : player.speed;
+      if (touch.followActive) {
+        const tx = clamp(touch.targetX, 20, canvas.width - 20);
+        const ty = clamp(touch.targetY, 36, canvas.height - 26);
+        const followLerp = clamp(delta * 11.5, 0, 1);
+        player.x = clamp(player.x + (tx - player.x) * followLerp, 18, canvas.width - 18);
+        player.y = clamp(player.y + (ty - player.y) * followLerp, 24, canvas.height - 22);
+      } else {
+        player.x = clamp(player.x + mx * speed * delta, 18, canvas.width - 18);
+        player.y = clamp(player.y + my * speed * delta, 24, canvas.height - 22);
+      }
+
+      if (player.fireCooldown <= 0) {
+        playerShoot();
+        const rapidMul = Math.max(0.56, 1 - player.rapidLevel * 0.12);
+        player.fireCooldown = player.fireInterval * currentDiff().playerFireMul * rapidMul;
+      }
+
+      if (!boss && !bossSpawnedForStage && !bossWarningIssued && elapsed >= nextBossTime - 2.4) {
+        noiseBurst(0.08, 0.04, 1000);
+        beep(240, 0.12, 0.03, "sawtooth", 0.02);
+        spawnBoss();
+      }
+
+      if (state === GAME.PLAYING && !boss) {
+        enemySpawnTimer -= delta;
+        if (enemySpawnTimer <= 0) {
+          spawnEnemy();
+          enemySpawnInterval = Math.max(0.42, (0.98 - elapsed * 0.0022 - stage * 0.012) * currentDiff().spawnMul);
+          enemySpawnTimer = enemySpawnInterval;
+        }
+      }
+
+      for (let i = bullets.length - 1; i >= 0; i--) {
+        const b = bullets[i];
+        b.x += b.vx * delta; b.y += b.vy * delta;
+        if (b.y < -30 || b.x < -40 || b.x > canvas.width + 40 || b.y > canvas.height + 40) bullets.splice(i, 1);
+      }
+
+      for (let i = bullets.length - 1; i >= 0; i--) {
+        const pb = bullets[i];
+        if (!pb) continue;
+        for (let j = enemyBullets.length - 1; j >= 0; j--) {
+          const eb = enemyBullets[j];
+          if (eb && rectsOverlap(pb, eb)) {
+            eb.hp -= 1; bullets.splice(i, 1);
+            addParticle((pb.x + eb.x) / 2, (pb.y + eb.y) / 2, "#ffffff", 5, 35, 2);
+            if (eb.hp <= 0) enemyBullets.splice(j, 1);
+            beep(980, 0.025, 0.012, "square", -0.04);
+            break;
+          }
+        }
+      }
+
+      for (let i = enemyBullets.length - 1; i >= 0; i--) {
+        const b = enemyBullets[i];
+        if (!b) continue;
+        b.x += b.vx * delta; b.y += b.vy * delta;
+        if (b.y < -40 || b.y > canvas.height + 40 || b.x < -40 || b.x > canvas.width + 40) { enemyBullets.splice(i, 1); continue; }
+        if (rectsOverlap({x:player.x,y:player.y,width:10,height:10}, b)) {
+          enemyBullets.splice(i, 1); damagePlayer(1);
+          if (state === GAME.GAME_OVER) return;
+        }
+      }
+
+      for (let i = enemies.length - 1; i >= 0; i--) {
+        const e = enemies[i];
+        if (!e) continue;
+        e.x += e.vx * delta; e.y += e.vy * delta;
+        if (e.kind === "zigzag" && (e.x < 25 || e.x > canvas.width - 25)) e.vx *= -1;
+        if (e.kind !== "zigzag") e.x = clamp(e.x, 18, canvas.width - 18);
+        e.fireTimer -= delta;
+        if (e.fireTimer <= 0) {
+          const a = aimAtPlayer(e.x, e.y);
+          if (e.kind === "small") { makeEnemyBullet(e.x, e.y + 8, a, 145 + level * 1.4); e.fireTimer = rand(1.75, 2.45) * currentDiff().enemyFireMul; }
+          else if (e.kind === "gunner") {
+            makeEnemyBullet(e.x - 5, e.y + 8, a - 0.10, 155 + level * 1.5); makeEnemyBullet(e.x + 5, e.y + 8, a + 0.10, 155 + level * 1.5);
+            e.fireTimer = rand(1.85, 2.65) * currentDiff().enemyFireMul;
+          } else {
+            for (let s = -1; s <= 1; s++) makeEnemyBullet(e.x, e.y + 8, a + s * 0.22, 145 + level * 1.5, "big", 2);
+            e.fireTimer = rand(1.9, 2.7) * currentDiff().enemyFireMul;
+          }
+          beep(260, 0.03, 0.010, "square", -0.12);
+        }
+        if (e.y > canvas.height + 30) { enemies.splice(i, 1); continue; }
+        if (rectsOverlap({x:player.x,y:player.y,width:16,height:16}, e)) {
+          enemies.splice(i, 1); damagePlayer(1);
+          if (state === GAME.GAME_OVER) return;
+          continue;
+        }
+        for (let j = bullets.length - 1; j >= 0; j--) {
+          const b = bullets[j];
+          if (b && rectsOverlap(b, e)) {
+            e.hp -= b.damage; bullets.splice(j, 1); addParticle(b.x, b.y, "#ffffff", 2, 25, 2);
+            if (e.hp <= 0) { destroyEnemy(i); break; }
+          }
+        }
+      }
+
+      if (boss) {
+  const hpRate = boss.hp / boss.maxHp;
+  const tier = boss.tier || 1;
+
+  if (hpRate <= 0.60 && boss.phase === 1) {
+    boss.phase = 2; boss.width = Math.max(boss.width, 126); boss.height = Math.max(boss.height, 84); boss.vx *= 1.15;
+    addTextParticle(boss.x, boss.y - 70, "2ND FORM", "#a78bfa");
+    addParticle(boss.x, boss.y, "#a78bfa", 36, 180, 5);
+    beep(360, 0.18, 0.03, "sawtooth", 0.1);
+  }
+  if (stage >= 25 && hpRate <= 0.12 && !boss.thirdForm) {
+    boss.thirdForm = true; boss.phase = 3; boss.width = Math.max(boss.width, 138); boss.height = Math.max(boss.height, 92); boss.vx *= 1.18;
+    addTextParticle(boss.x, boss.y - 86, "3RD FORM", "#f43f5e");
+    addParticle(boss.x, boss.y, "#f43f5e", 52, 230, 6);
+    noiseBurst(0.18, 0.06, 850);
+  }
+  if (hpRate <= 0.25 && !boss.enraged) {
+    boss.enraged = true; boss.vx *= 1.25;
+    addTextParticle(boss.x, boss.y - 100, "BERSERK!!", "#fb7185");
+    addParticle(boss.x, boss.y, "#fb7185", 46, 220, 6);
+    noiseBurst(0.16, 0.06, 900);
+  }
+
+  if (boss.entering) {
+    boss.y = Math.min(boss.targetY, boss.y + boss.entrySpeed * delta);
+    if (boss.y >= boss.targetY) {
+      boss.entering = false;
+      addTextParticle(boss.x, boss.y - 70, "ENGAGE!", "#67e8f9");
+      beep(520, 0.12, 0.022, "square", 0.04);
+    }
+  } else {
+    boss.x += boss.vx * delta;
+    const sidePad = tier >= 3 ? 95 : 80;
+    if (boss.x < sidePad || boss.x > canvas.width - sidePad) boss.vx *= -1;
+    boss.fireTimer -= delta; boss.spreadTimer -= delta; boss.summonTimer -= delta; boss.sniperTimer -= delta; boss.waveTimer -= delta; boss.rainTimer -= delta;
+    boss.spiralTimer -= delta; boss.sweepTimer -= delta; boss.crossTimer -= delta;
+  }
+
+  const phaseFireBonus = boss.phase === 2 ? 0.88 : 1;
+  const thirdBonus = boss.thirdForm ? 0.78 : 1;
+  const berserkBonus = boss.enraged ? 0.72 : 1;
+  const cadence = currentDiff().enemyFireMul * phaseFireBonus * thirdBonus * berserkBonus;
+
+  if (!boss.entering && boss.fireTimer <= 0) {
+    const base = aimAtPlayer(boss.x, boss.y + 8);
+    const baseCount = tier >= 3 ? 7 : 5;
+    const extra = (boss.phase >= 2 ? 2 : 0) + (boss.thirdForm ? 2 : 0);
+    const spacing = boss.enraged ? 0.09 : (stage >= 6 ? 0.11 : 0.14);
+    const total = baseCount + extra;
+    for (let i = -Math.floor(total/2); i <= Math.floor(total/2); i++) {
+      makeEnemyBullet(boss.x, boss.y + 14, base + i * spacing, 150 + stage * 5 + (boss.enraged ? 20 : 0), "big", boss.phase >= 2 ? 2 : 1);
+    }
+    boss.fireTimer = Math.max(0.32, (1.18 - stage * 0.035) * cadence);
+    beep(180, 0.05, 0.015, "sawtooth", -0.04);
+  }
+
+  if (!boss.entering && boss.spreadTimer <= 0) {
+    const count = Math.min(34, 12 + stage * 2 + (boss.phase >= 2 ? 4 : 0) + (boss.enraged ? 4 : 0) + (boss.thirdForm ? 4 : 0));
+    for (let i = 0; i < count; i++) {
+      const a = (Math.PI * 2 / count) * i + elapsed * (0.7 + stage * 0.02);
+      makeEnemyBullet(boss.x, boss.y + 8, a, 98 + stage * 3.2 + (boss.enraged ? 14 : 0), boss.phase >= 2 ? "big" : "normal", boss.phase >= 2 ? 2 : 1);
+    }
+    boss.spreadTimer = Math.max(0.85, (tier >= 2 ? 2.5 : 2.8) * cadence);
+    noiseBurst(0.05, 0.02, 1500);
+  }
+
+  if (!boss.entering && boss.sniperTimer <= 0) {
+    const base = aimAtPlayer(boss.x, boss.y);
+    const bursts = Math.min(10, 2 + Math.floor(stage / 2) + (boss.phase >= 2 ? 1 : 0) + (boss.enraged ? 2 : 0) + (boss.thirdForm ? 2 : 0));
+    for (let i = 0; i < bursts; i++) {
+      makeEnemyBullet(boss.x - 28 + i * 7, boss.y + 12, base + rand(-0.04, 0.04), 220 + stage * 7 + (boss.enraged ? 25 : 0), "needle", 1);
+    }
+    boss.sniperTimer = Math.max(0.95, (tier >= 2 ? 3.7 : 4.2) * cadence);
+    beep(300, 0.06, 0.014, "square", -0.1);
+  }
+
+  if (!boss.entering && boss.waveTimer <= 0) {
+    const rows = Math.min(7, 2 + Math.floor(stage / 3) + (boss.phase >= 2 ? 1 : 0) + (boss.enraged ? 1 : 0) + (tier >= 2 ? 1 : 0));
+    for (let r = 0; r < rows; r++) {
+      for (let i = -4; i <= 4; i++) {
+        const a = Math.PI / 2 + i * 0.11 + r * 0.035;
+        makeEnemyBullet(boss.x, boss.y + 20, a, 110 + r * 12 + stage * 2.5 + (boss.enraged ? 12 : 0), r % 2 === 0 && boss.phase >= 2 ? "big" : "normal", boss.phase >= 2 ? 2 : 1);
+      }
+    }
+    boss.waveTimer = Math.max(0.95, (tier >= 2 ? 3.0 : 3.6) * cadence);
+    noiseBurst(0.07, 0.018, 1100);
+  }
+
+  if (!boss.entering && stage >= 3 && boss.rainTimer <= 0) {
+    const rainCount = Math.min(24, 6 + stage + (boss.phase >= 2 ? 2 : 0) + (boss.enraged ? 4 : 0) + (tier >= 4 ? 3 : 0));
+    for (let i = 0; i < rainCount; i++) {
+      const rx = rand(40, canvas.width - 40);
+      makeEnemyBullet(rx, -10, Math.PI / 2 + rand(-0.1, 0.1), 110 + stage * 2.5 + (boss.enraged ? 18 : 0), tier >= 4 ? "big" : "needle", tier >= 4 ? 2 : 1);
+    }
+    boss.rainTimer = Math.max(1.0, (tier >= 4 ? 3.8 : 4.8) * cadence);
+    beep(220, 0.05, 0.012, "triangle", -0.02);
+  }
+
+  if (!boss.entering && tier >= 3 && boss.spiralTimer <= 0) {
+    const spiralCount = boss.thirdForm ? 22 : 16;
+    const spin = elapsed * (boss.thirdForm ? 2.8 : 2.0);
+    for (let i = 0; i < spiralCount; i++) {
+      const a = spin + (Math.PI * 2 / spiralCount) * i;
+      makeEnemyBullet(boss.x, boss.y + 10, a, 120 + stage * 2.5 + (i % 2) * 18, i % 2 === 0 ? "normal" : "needle", 1);
+    }
+    boss.spiralTimer = Math.max(1.1, (boss.thirdForm ? 2.1 : 3.0) * cadence);
+    beep(460, 0.05, 0.016, "triangle", 0.02);
+  }
+
+  if (!boss.entering && tier >= 3 && boss.sweepTimer <= 0) {
+    const side = (Math.floor(elapsed * 2) % 2 === 0) ? -1 : 1;
+    for (let i = -3; i <= 3; i++) {
+      const a = (side < 0 ? Math.PI * 0.65 : Math.PI * 0.35) + i * 0.08;
+      makeEnemyBullet(boss.x + side * 30, boss.y + 8, a, 145 + stage * 3 + Math.abs(i) * 8, "big", 2);
+    }
+    boss.sweepTimer = Math.max(1.25, (boss.thirdForm ? 2.2 : 3.2) * cadence);
+    noiseBurst(0.06, 0.02, 900);
+  }
+
+  if (!boss.entering && tier >= 4 && boss.crossTimer <= 0) {
+    const baseAngles = [0, Math.PI/2, Math.PI, Math.PI*1.5, Math.PI/4, Math.PI*3/4, Math.PI*5/4, Math.PI*7/4];
+    for (const a0 of baseAngles) {
+      makeEnemyBullet(boss.x, boss.y + 8, a0 + elapsed * 0.15, 150 + stage * 2, "big", 2);
+    }
+    boss.crossTimer = Math.max(1.15, (boss.thirdForm ? 2.0 : 2.9) * cadence);
+    beep(260, 0.07, 0.018, "sawtooth", -0.03);
+  }
+
+  if (!boss.entering && boss.summonTimer <= 0) {
+    const theme = currentTheme();
+    const adds = Math.min(8, 2 + Math.floor(stage / 3) + (boss.phase >= 2 ? 1 : 0) + (boss.enraged ? 1 : 0) + (tier >= 2 ? 1 : 0));
+    for (let k = 0; k < adds; k++) {
+      const left = k % 2 === 0;
+      enemies.push({
+        kind: k % 3 === 0 ? "zigzag" : (k % 2 === 0 ? "small" : "gunner"),
+        x: boss.x + rand(left ? -70 : 20, left ? -18 : 70), y: boss.y + rand(10, 26),
+        width: k % 3 === 0 ? 24 : (k % 2 === 0 ? 18 : 22), height: k % 3 === 0 ? 24 : (k % 2 === 0 ? 18 : 22),
+        hp: scaleEnemyHP(k % 3 === 0 ? 4 : (k % 2 === 0 ? 2 : 3)), maxHp: scaleEnemyHP(k % 3 === 0 ? 4 : (k % 2 === 0 ? 2 : 3)),
+        score: k % 3 === 0 ? 35 : (k % 2 === 0 ? 12 : 22), vx: left ? -30 - k * 5 : 30 + k * 5, vy: 60 + k * 8,
+        fireTimer: (1.6 + k * 0.15) * currentDiff().enemyFireMul,
+        color: k % 3 === 0 ? theme.enemyZigzag : (k % 2 === 0 ? theme.enemySmall : theme.enemyGunner)
+      });
+    }
+    boss.summonTimer = Math.max(1.7, 5.0 * cadence);
+  }
+
+  for (let j = bullets.length - 1; j >= 0; j--) {
+    const b = bullets[j];
+    if (!boss.entering && b && rectsOverlap(b, boss)) {
+      boss.hp -= b.damage;
+      bullets.splice(j, 1);
+      addParticle(b.x, b.y, "#ffffff", 2, 25, 2);
+      if (boss.hp <= 0) {
+        score += 250 + (stage - 1) * 90;
+        addParticle(boss.x, boss.y, "#ffcf4d", 36, 180, 5);
+        noiseBurst(0.2, 0.07, 1000);
+        const rewardPool = stage >= 21 ? ["wide","side","rapid","shield","beam","drone"] : ["wide","side","rapid","shield"];
+        if (Math.random() < 0.7) spawnPickup(boss.x, boss.y, rewardPool[randInt(0, rewardPool.length - 1)]);
+        clearStage();
+        return;
+      }
+    }
+  }
+  if (!boss.entering && rectsOverlap({x:player.x,y:player.y,width:16,height:16}, boss)) {
+    damagePlayer(2);
+    if (state === GAME.GAME_OVER) return;
+  }
+}
+
+for (let i = pickups.length - 1; i >= 0; i--) {
+        const p = pickups[i];
+        if (!p) continue;
+        p.y += p.vy * delta; p.t += delta * 6; p.x += Math.sin(p.t) * 0.6;
+        if (p.y > canvas.height + 20) { pickups.splice(i, 1); continue; }
+        if (rectsOverlap({x:player.x,y:player.y,width:16,height:16}, p)) { applyPickup(p.type, p.x, p.y); pickups.splice(i, 1); }
+      }
+    }
+
+    function drawPixelRect(x, y, w, h, fill, border = "#0f172a") {
+      ctx.fillStyle = fill; ctx.fillRect(Math.round(x), Math.round(y), Math.round(w), Math.round(h));
+      ctx.strokeStyle = border; ctx.lineWidth = 2; ctx.strokeRect(Math.round(x)+0.5, Math.round(y)+0.5, Math.round(w)-1, Math.round(h)-1);
+    }
+    function drawBackground() {
+      const th = currentTheme();
+      const g = ctx.createLinearGradient(0, 0, 0, canvas.height);
+      g.addColorStop(0, th.bgTop);
+      g.addColorStop(0.55, th.bgMid);
+      g.addColorStop(1, th.bgBottom);
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      for (const s of stars) {
+        ctx.fillStyle = s.size === 3 ? th.starsA : th.starsB;
+        ctx.fillRect(Math.round(s.x), Math.round(s.y), s.size, s.size);
+      }
+      for (let y = 0; y < canvas.height; y += 20) {
+        ctx.fillStyle = y % 40 === 0 ? th.lineA : th.lineB;
+        ctx.fillRect(0, y, canvas.width, 2);
+      }
+    }
+    function drawPlayer() {
+      if (player.invincible > 0 && Math.floor(player.invincible * 16) % 2 === 0) return;
+      const x = Math.round(player.x), y = Math.round(player.y);
+      drawPixelRect(x - 8, y - 10, 16, 20, "#67e8f9");
+      drawPixelRect(x - 2, y - 14, 4, 6, "#e2e8f0");
+      drawPixelRect(x - 12, y + 2, 4, 8, "#38bdf8");
+      drawPixelRect(x + 8, y + 2, 4, 8, "#38bdf8");
+      drawPixelRect(x - 3, y + 10, 6, 6, "#f8fafc");
+      ctx.fillStyle = "#f59e0b"; ctx.fillRect(x - 2, y + 16, 4, 6);
+      if (player.shield > 0) { ctx.strokeStyle = "#67e8f9"; ctx.lineWidth = 2; ctx.strokeRect(x - 14.5, y - 16.5, 29, 33); }
+    }
+    function drawEnemies() {
+      const themeIdx = currentThemeIndex();
+
+      function drawThemeAccessory(kind) {
+        switch (themeIdx) {
+          case 0: // DEEP SPACE
+            ctx.fillStyle = "#fef3c7";
+            ctx.fillRect(-1, -16, 2, 4);
+            ctx.fillRect(-4, -13, 8, 2);
+            if (kind === "zigzag") {
+              ctx.fillStyle = "#bfdbfe";
+              ctx.fillRect(-16, -2, 3, 3);
+              ctx.fillRect(13, -2, 3, 3);
+            }
+            break;
+          case 1: // NEBULA
+            ctx.fillStyle = "#f9a8d4";
+            ctx.fillRect(-10, 1, 3, 2);
+            ctx.fillRect(7, 1, 3, 2);
+            if (kind === "gunner") {
+              ctx.fillStyle = "#f5d0fe";
+              ctx.fillRect(-8, -14, 16, 3);
+            }
+            break;
+          case 2: // CRIMSON ZONE
+            ctx.fillStyle = "#fdba74";
+            ctx.fillRect(-6, -15, 3, 4);
+            ctx.fillRect(3, -15, 3, 4);
+            ctx.fillRect(-1, -18, 2, 5);
+            if (kind === "zigzag") {
+              ctx.fillStyle = "#fca5a5";
+              ctx.fillRect(-2, 10, 4, 3);
+            }
+            break;
+          case 3: // TOXIC CIRCUIT
+            ctx.fillStyle = "#86efac";
+            ctx.fillRect(-1, -17, 2, 5);
+            ctx.fillRect(-6, -13, 5, 2);
+            ctx.fillRect(1, -13, 5, 2);
+            if (kind === "gunner") {
+              ctx.fillStyle = "#bbf7d0";
+              ctx.fillRect(-9, 8, 18, 2);
+            }
+            break;
+          case 4: // VOID CORE
+            ctx.strokeStyle = "#93c5fd";
+            ctx.lineWidth = 2;
+            if (kind === "small") {
+              ctx.strokeRect(-14.5, -14.5, 29, 29);
+            } else if (kind === "gunner") {
+              ctx.strokeRect(-16.5, -15.5, 33, 31);
+            } else {
+              ctx.strokeRect(-17.5, -17.5, 35, 35);
+            }
+            break;
+        }
+      }
+
+      for (const e of enemies) {
+        const x = Math.round(e.x), y = Math.round(e.y);
+        ctx.save();
+        ctx.translate(x, y);
+
+        if (e.kind === "small") {
+          ctx.fillStyle = e.color;
+          ctx.beginPath();
+          ctx.arc(0, 0, 11, 0, Math.PI * 2);
+          ctx.fill();
+          drawThemeAccessory("small");
+          ctx.fillStyle = "#111827";
+          ctx.fillRect(-5, -3, 3, 4);
+          ctx.fillRect(2, -3, 3, 4);
+          ctx.fillStyle = "#fff";
+          ctx.fillRect(-4, -2, 1, 1);
+          ctx.fillRect(3, -2, 1, 1);
+          ctx.fillStyle = themeIdx === 1 ? "#fbcfe8" : "#fecdd3";
+          ctx.fillRect(-8, 2, 3, 2);
+          ctx.fillRect(5, 2, 3, 2);
+          ctx.fillStyle = "#fca5a5";
+          ctx.fillRect(-7, 10, 4, 3);
+          ctx.fillRect(3, 10, 4, 3);
+        } else if (e.kind === "gunner") {
+          ctx.fillStyle = e.color;
+          ctx.beginPath();
+          ctx.moveTo(-6, -10);
+          ctx.lineTo(6, -10);
+          ctx.arcTo(12, -10, 12, -4, 6);
+          ctx.lineTo(12, 6);
+          ctx.arcTo(12, 12, 6, 12, 6);
+          ctx.lineTo(-6, 12);
+          ctx.arcTo(-12, 12, -12, 6, 6);
+          ctx.lineTo(-12, -4);
+          ctx.arcTo(-12, -10, -6, -10, 6);
+          ctx.fill();
+          drawThemeAccessory("gunner");
+          ctx.fillStyle = "#fff7ed";
+          ctx.fillRect(-4, -14, 8, 4);
+          ctx.fillStyle = "#111827";
+          ctx.fillRect(-6, -3, 3, 4);
+          ctx.fillRect(3, -3, 3, 4);
+          ctx.fillStyle = "#fff";
+          ctx.fillRect(-5, -2, 1, 1);
+          ctx.fillRect(4, -2, 1, 1);
+          ctx.fillStyle = "#fef3c7";
+          ctx.fillRect(-3, 5, 6, 3);
+          ctx.fillStyle = themeIdx === 3 ? "#86efac" : "#fdba74";
+          ctx.fillRect(-10, 8, 4, 3);
+          ctx.fillRect(6, 8, 4, 3);
+        } else {
+          ctx.fillStyle = e.color;
+          ctx.beginPath();
+          for (let i = 0; i < 8; i++) {
+            const a = Math.PI / 4 * i - Math.PI / 2;
+            const r = i % 2 === 0 ? 13 : 7;
+            const px = Math.cos(a) * r;
+            const py = Math.sin(a) * r;
+            if (i === 0) ctx.moveTo(px, py);
+            else ctx.lineTo(px, py);
+          }
+          ctx.closePath();
+          ctx.fill();
+          drawThemeAccessory("zigzag");
+          ctx.fillStyle = "#111827";
+          ctx.fillRect(-5, -2, 3, 4);
+          ctx.fillRect(2, -2, 3, 4);
+          ctx.fillStyle = "#fff";
+          ctx.fillRect(-4, -1, 1, 1);
+          ctx.fillRect(3, -1, 1, 1);
+          ctx.fillStyle = "#fef3c7";
+          ctx.fillRect(-3, 5, 6, 2);
+        }
+
+        ctx.restore();
+      }
+    }
+    function drawBoss() {
+  if (!boss) return;
+  const th = currentTheme();
+  const x = Math.round(boss.x), y = Math.round(boss.y);
+  const isHeartZero = !!boss.isHeartZero;
+
+  if (boss.entering) {
+    ctx.fillStyle = "rgba(255,255,255,0.08)";
+    ctx.fillRect(x - 90, y - 100, 180, boss.height + 90);
+  }
+
+  const tier = boss.tier || 1;
+
+  if (isHeartZero && HEART_ZERO_SPRITE.complete) {
+    const pulse = 1 + Math.sin(performance.now() / 220) * 0.025;
+    const drawH = boss.enraged ? 250 : boss.thirdForm ? 238 : boss.phase === 2 ? 228 : 218;
+    const drawW = Math.round(drawH * (1024 / 1387));
+    const drawX = x - drawW / 2;
+    const drawY = y - drawH / 2 - 18;
+
+    ctx.save();
+    ctx.globalAlpha = 0.18;
+    ctx.fillStyle = boss.enraged ? "#fb7185" : boss.thirdForm ? "#f43f5e" : boss.phase === 2 ? "#a78bfa" : "#67e8f9";
+    ctx.fillRect(drawX - 8, drawY - 8, drawW + 16, drawH + 16);
+    ctx.restore();
+
+    ctx.save();
+    if (boss.enraged) {
+      ctx.shadowColor = "#fb7185";
+      ctx.shadowBlur = 18;
+    } else if (boss.thirdForm) {
+      ctx.shadowColor = "#f43f5e";
+      ctx.shadowBlur = 14;
+    } else if (boss.phase === 2) {
+      ctx.shadowColor = "#a78bfa";
+      ctx.shadowBlur = 12;
+    } else {
+      ctx.shadowColor = "#67e8f9";
+      ctx.shadowBlur = 10;
+    }
+    ctx.drawImage(HEART_ZERO_SPRITE, drawX, drawY, drawW * pulse, drawH * pulse);
+    ctx.restore();
+
+    // phase tint overlays so the sprite responds to battle state
+    if (boss.phase === 2 || boss.thirdForm || boss.enraged) {
+      ctx.save();
+      ctx.globalAlpha = boss.enraged ? 0.18 : boss.thirdForm ? 0.13 : 0.10;
+      ctx.fillStyle = boss.enraged ? "#fb7185" : boss.thirdForm ? "#f43f5e" : "#a78bfa";
+      ctx.fillRect(drawX, drawY, drawW, drawH);
+      ctx.restore();
+    }
+
+    // collision frame hint while entering / phase changes
+    if (boss.entering || boss.enraged) {
+      ctx.strokeStyle = boss.enraged ? "#fde047" : "#67e8f9";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x - boss.width / 2 - 6.5, y - boss.height / 2 - 6.5, boss.width + 13, boss.height + 13);
+    }
+  } else {
+    let body = th.boss, horn = "#111827", eye = "#111827", core = "#fef3c7";
+    if (tier === 2) { body = "#f97316"; horn = "#7c2d12"; core = "#fdba74"; }
+    if (tier === 3) { body = "#06b6d4"; horn = "#164e63"; core = "#a5f3fc"; }
+    if (tier === 4) { body = "#8b5cf6"; horn = "#312e81"; core = "#ddd6fe"; }
+    if (boss.phase === 2) { body = "#a78bfa"; horn = "#581c87"; core = "#ddd6fe"; }
+    if (boss.thirdForm) { body = "#f43f5e"; horn = "#881337"; eye = "#fff"; core = "#fde047"; }
+    if (boss.enraged) { body = "#fb7185"; horn = "#881337"; eye = "#fff"; core = "#fde047"; }
+
+    drawPixelRect(x - boss.width/2, y - boss.height/2, boss.width, boss.height, body);
+    drawPixelRect(x - 22, y - boss.height/2 - 10, 44, 12, boss.thirdForm ? "#fde047" : (boss.phase === 2 ? "#c4b5fd" : "#ffffff33"));
+    drawPixelRect(x - boss.width/2 + 8, y - 16, 18, 14, horn);
+    drawPixelRect(x + boss.width/2 - 26, y - 16, 18, 14, horn);
+
+    if (tier >= 2) {
+      drawPixelRect(x - boss.width/2 + 18, y + 18, 12, 10, horn);
+      drawPixelRect(x + boss.width/2 - 30, y + 18, 12, 10, horn);
+    }
+    if (tier >= 3) {
+      drawPixelRect(x - 44, y - boss.height/2 + 10, 10, 10, "#e0f2fe");
+      drawPixelRect(x + 34, y - boss.height/2 + 10, 10, 10, "#e0f2fe");
+    }
+    if (tier >= 4) {
+      ctx.strokeStyle = "#c4b5fd";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x - boss.width/2 - 6.5, y - boss.height/2 - 6.5, boss.width + 13, boss.height + 13);
+    }
+
+    drawPixelRect(x - 30, y - 6, 14, 14, eye);
+    drawPixelRect(x + 16, y - 6, 14, 14, eye);
+    if (boss.enraged || boss.thirdForm) {
+      ctx.fillStyle = "#fff"; ctx.fillRect(x - 27, y - 3, 8, 3); ctx.fillRect(x + 19, y - 3, 8, 3);
+    }
+    drawPixelRect(x - 8, y + 12, 16, 10, core);
+  }
+
+  const barW = 320, bx = canvas.width / 2 - barW / 2, by = 18;
+  drawPixelRect(bx, by, barW, 16, "#1f2937");
+  const fillColor = isHeartZero ? (boss.enraged ? "#fb7185" : boss.thirdForm ? "#f43f5e" : boss.phase === 2 ? "#a78bfa" : "#67e8f9")
+                                : (boss.enraged ? "#fb7185" : boss.thirdForm ? "#f43f5e" : (boss.phase === 2 ? "#a78bfa" : th.boss));
+  ctx.fillStyle = fillColor;
+  ctx.fillRect(Math.round(bx + 3), Math.round(by + 3), Math.round((barW - 6) * (boss.hp / boss.maxHp)), 10);
+  ctx.fillStyle = "#fff";
+  ctx.font = "bold 14px monospace";
+  ctx.textAlign = "center";
+  const bossCfg = getBossConfigForStage(stage);
+  const bossName = bossCfg?.name || (isHeartZero ? "HEART ZERO" : (["PROTO","FORTRESS","NEO","OMEGA"][tier - 1] || "BOSS"));
+  const formName = boss.enraged ? "BERSERK" : (boss.thirdForm ? "3RD FORM" : (boss.phase === 2 ? "2ND FORM" : "NORMAL"));
+  ctx.font = "bold 12px monospace";
+  ctx.fillText("BOSS - " + bossName + " / " + formName, canvas.width / 2, 14);
+  ctx.textAlign = "left";
+}
+    function drawBullets() {
+      for (const b of bullets) drawPixelRect(b.x - b.width / 2, b.y - b.height / 2, b.width, b.height, b.color || "#fde68a");
+    }
+    function drawEnemyBullets() {
+  const themeIdx = currentThemeIndex();
+  const palettes1 = [
+    { normal:"#fca5a5", big:"#fb7185", needle:"#fef08a", accent:"#fff1f2" },
+    { normal:"#e9d5ff", big:"#c084fc", needle:"#f9a8d4", accent:"#f5d0fe" },
+    { normal:"#fdba74", big:"#f97316", needle:"#fde68a", accent:"#ffedd5" },
+    { normal:"#86efac", big:"#4ade80", needle:"#d9f99d", accent:"#dcfce7" },
+    { normal:"#93c5fd", big:"#818cf8", needle:"#bfdbfe", accent:"#dbeafe" }
+  ];
+  const palettes2 = [
+    { normal:"#67e8f9", big:"#06b6d4", needle:"#a5f3fc", accent:"#ecfeff" },
+    { normal:"#f0abfc", big:"#d946ef", needle:"#f5d0fe", accent:"#fae8ff" },
+    { normal:"#fde047", big:"#eab308", needle:"#fef08a", accent:"#fefce8" },
+    { normal:"#fca5a5", big:"#ef4444", needle:"#fecaca", accent:"#fef2f2" },
+    { normal:"#c4b5fd", big:"#8b5cf6", needle:"#ddd6fe", accent:"#f5f3ff" }
+  ];
+  const pal = (currentLoop() === 2 ? palettes2 : palettes1)[themeIdx];
+
+  for (const b of enemyBullets) {
+    const color = b.type === "big" ? pal.big : (b.type === "needle" ? pal.needle : pal.normal);
+    drawPixelRect(b.x - b.width / 2, b.y - b.height / 2, b.width, b.height, color);
+    ctx.fillStyle = pal.accent;
+    if (b.type === "needle") ctx.fillRect(Math.round(b.x - 1), Math.round(b.y - b.height / 2 + 2), 2, Math.max(2, b.height - 4));
+    else if (b.type === "big") ctx.fillRect(Math.round(b.x - 2), Math.round(b.y - 2), 4, 4);
+    else ctx.fillRect(Math.round(b.x - 1), Math.round(b.y - 1), 2, 2);
+  }
+}
+function pickupLabel(type) { return { heal:"+", bomb:"B", wide:"W", side:"S", rapid:"R", shield:"H", beam:"L", drone:"D" }[type] || "?"; }
+    function drawPickups() {
+      for (const p of pickups) {
+        drawPixelRect(p.x - 7, p.y - 7, 14, 14, PICKUP_COLORS[p.type] || "#fff");
+        ctx.fillStyle = "#111827"; ctx.font = "bold 12px monospace"; ctx.textAlign = "center"; ctx.fillText(pickupLabel(p.type), p.x, p.y + 4); ctx.textAlign = "left";
+      }
+    }
+    function drawParticles() {
+      for (const p of particles) {
+        ctx.globalAlpha = Math.max(0, p.life / p.maxLife);
+        if (p.deadFace) {
+          ctx.save();
+          ctx.translate(Math.round(p.x), Math.round(p.y));
+          ctx.fillStyle = p.color;
+          if (p.kind === "small") {
+            ctx.beginPath();
+            ctx.arc(0, 0, 9, 0, Math.PI * 2);
+            ctx.fill();
+          } else if (p.kind === "gunner") {
+            ctx.fillRect(-10, -8, 20, 18);
+          } else {
+            ctx.beginPath();
+            for (let i = 0; i < 8; i++) {
+              const a = Math.PI / 4 * i - Math.PI / 2;
+              const r = i % 2 === 0 ? 11 : 6;
+              const px = Math.cos(a) * r;
+              const py = Math.sin(a) * r;
+              if (i === 0) ctx.moveTo(px, py);
+              else ctx.lineTo(px, py);
+            }
+            ctx.closePath();
+            ctx.fill();
+          }
+          ctx.fillStyle = "#111827";
+          ctx.fillRect(-5, -3, 3, 3);
+          ctx.fillRect(2, -3, 3, 3);
+          ctx.fillRect(-5, -1, 3, 1);
+          ctx.fillRect(2, -1, 3, 1);
+          ctx.fillRect(-3, 4, 6, 2);
+          ctx.restore();
+        } else if (p.textMode) {
+          ctx.fillStyle = p.color;
+          ctx.font = "bold 16px monospace";
+          ctx.textAlign = "center";
+          ctx.fillText(p.text, p.x, p.y);
+          ctx.textAlign = "left";
+        } else {
+          ctx.fillStyle = p.color;
+          ctx.fillRect(Math.round(p.x), Math.round(p.y), Math.max(1, p.size), Math.max(1, p.size));
+        }
+      }
+      ctx.globalAlpha = 1;
+    }
+    function drawPowerIcons() {
+      const baseX = canvas.width - 182, baseY = 70;
+      const items = [
+        ["W", player.wideLevel, player.wideTimer, "#60a5fa"],
+        ["S", player.sideLevel, player.sideTimer, "#c084fc"],
+        ["R", player.rapidLevel, player.rapidTimer, "#fb7185"],
+        ["H", player.shield, player.shieldTimer, "#67e8f9"],
+        ["L", player.beamLevel, player.beamTimer, "#f59e0b"],
+        ["D", player.droneLevel, player.droneTimer, "#22d3ee"]
+      ];
+      let y = baseY;
+      for (const [label, level, timer, color] of items) {
+        drawPixelRect(baseX, y, 170, 24, "#111827");
+        ctx.fillStyle = color;
+        ctx.font = "bold 14px monospace";
+        ctx.fillText(label, baseX + 10, y + 17);
+        ctx.fillStyle = "#fff";
+        ctx.fillText(effectTimeText(level, timer), baseX + 36, y + 17);
+        y += 28;
+      }
+    }
+    function drawHud() {
+  drawPixelRect(12, 12, 236, 92, "#111827");
+  ctx.fillStyle = "#eef2ff"; ctx.font = "bold 18px monospace"; ctx.fillText("SCORE " + String(score).padStart(6, "0"), 22, 34);
+  ctx.fillStyle = "#a5b4cf"; ctx.font = "14px monospace"; ctx.fillText("HI " + String(highScore).padStart(6, "0"), 22, 56);
+  ctx.fillText("STAGE " + stage + " / " + MAX_STAGE, 22, 74);
+  const stageCfg = getStageConfig(stage);
+  const stageLabel = stageCfg?.name || currentTheme().name;
+  ctx.fillText(stageLabel + (currentLoop() === 2 ? "  LOOP 2" : ""), 22, 92);
+
+  drawPixelRect(12, 112, 150, 22, "#111827");
+  ctx.fillStyle = "#ef4444"; ctx.fillRect(15, 115, Math.round(144 * (player.hp / player.maxHp)), 16);
+  ctx.fillStyle = "#fff"; ctx.font = "bold 13px monospace"; ctx.fillText("HP", 172, 128);
+
+  drawPixelRect(canvas.width - 130, 12, 118, 48, "#111827");
+  ctx.fillStyle = "#facc15"; ctx.font = "bold 14px monospace"; ctx.fillText("BOMB x" + player.bomb, canvas.width - 118, 34);
+  if (combo > 1) { ctx.fillStyle = "#67e8f9"; ctx.fillText("COMBO " + combo, canvas.width - 118, 52); }
+
+  drawPowerIcons();
+}
+    function drawTouchUI() {
+      const isTouch = navigator.maxTouchPoints > 0 || "ontouchstart" in window;
+      if (!isTouch || !(state === GAME.PLAYING || state === GAME.BOSS || state === GAME.PAUSED)) return;
+      const bombX = canvas.width - 62, bombY = canvas.height - 76;
+      ctx.globalAlpha = 0.16;
+      if (touch.followActive) {
+        ctx.beginPath(); ctx.arc(touch.pointerX, touch.pointerY, 42, 0, Math.PI * 2); ctx.fillStyle = "#94a3b8"; ctx.fill();
+        ctx.beginPath(); ctx.arc(touch.targetX, touch.targetY, 20, 0, Math.PI * 2); ctx.fillStyle = "#67e8f9"; ctx.fill();
+        ctx.strokeStyle = "#e0f2fe"; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.moveTo(touch.pointerX, touch.pointerY); ctx.lineTo(touch.targetX, touch.targetY); ctx.stroke();
+      }
+      ctx.beginPath(); ctx.arc(bombX, bombY, 34, 0, Math.PI * 2); ctx.fillStyle = "#facc15"; ctx.fill();
+      ctx.globalAlpha = 0.86; ctx.fillStyle = "#111827"; ctx.font = "bold 18px monospace"; ctx.textAlign = "center";
+      ctx.fillText("B", bombX, bombY + 6);
+      ctx.font = "bold 12px monospace"; ctx.fillStyle = "#dbeafe";
+      ctx.fillText("TOUCH TO MOVE", canvas.width / 2, canvas.height - 26);
+      ctx.textAlign = "left"; ctx.globalAlpha = 1;
+    }
+    function drawOverlayPanel(x, y, w, h) {
+      drawPixelRect(x, y, w, h, "#0b1220"); ctx.strokeStyle = "#334155"; ctx.strokeRect(x + 8.5, y + 8.5, w - 17, h - 17);
+    }
+    function drawOverlay(title, lines, accent = "#67e8f9") {
+      ctx.fillStyle = "rgba(0,0,0,0.62)"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+      drawOverlayPanel(canvas.width / 2 - 220, canvas.height / 2 - 126, 440, 252);
+      ctx.fillStyle = accent; ctx.font = "bold 28px monospace"; ctx.textAlign = "center"; ctx.fillText(title, canvas.width / 2, canvas.height / 2 - 68);
+      ctx.fillStyle = "#e5e7eb"; ctx.font = "16px monospace"; lines.forEach((line, i) => ctx.fillText(line, canvas.width / 2, canvas.height / 2 - 18 + i * 24)); ctx.textAlign = "left";
+    }
+    function drawSlider(x, y, w, value, color) {
+      drawPixelRect(x, y, w, 12, "#0f172a"); ctx.fillStyle = color; ctx.fillRect(x + 3, y + 3, Math.round((w - 6) * value), 6); ctx.fillStyle = "#fff"; ctx.fillRect(x + Math.round((w - 6) * value), y - 3, 8, 18);
+    }
+    function drawMenuButton(x, y, w, h, title, value, selected, accent, sliderValue = null) {
+      drawPixelRect(x, y, w, h, selected ? "#172033" : "#101827");
+      ctx.fillStyle = selected ? accent : "#94a3b8"; ctx.fillRect(x + 6, y + 6, 6, h - 12);
+      ctx.fillStyle = "#dbeafe"; ctx.font = "bold 16px monospace"; ctx.textAlign = "left"; ctx.fillText(title, x + 24, y + 22);
+      ctx.fillStyle = "#ffffff"; ctx.font = "bold 20px monospace"; ctx.fillText(value, x + 24, y + 44);
+      if (sliderValue !== null) drawSlider(x + 180, y + 24, 180, sliderValue, accent);
+      else if (title === "DIFFICULTY") { ctx.textAlign = "right"; ctx.fillStyle = "#facc15"; ctx.fillText("< >", x + w - 18, y + 35); }
+      ctx.textAlign = "left";
+    }
+    
+function drawStageIntroBanner() {
+  if (stageIntroTimer <= 0 || !(state === GAME.PLAYING || state === GAME.BOSS)) return;
+  const alpha = stageIntroTimer > 1.4 ? 1 : Math.max(0, stageIntroTimer / 1.4);
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  const w = 420, h = 76, x = canvas.width / 2 - w / 2, y = 156;
+  drawOverlayPanel(x, y, w, h);
+  ctx.fillStyle = "#67e8f9";
+  ctx.font = "bold 24px monospace";
+  ctx.textAlign = "center";
+  const stageCfg = getStageConfig(stage);
+  ctx.fillText("STAGE " + stage + " - " + (stageCfg?.name || currentTheme().name), canvas.width / 2, y + 31);
+  ctx.fillStyle = "#dbeafe";
+  ctx.font = "14px monospace";
+  ctx.fillText((stageCfg?.theme || currentTheme().name) + (currentLoop() === 2 ? " / LOOP 2" : ""), canvas.width / 2, y + 55);
+  ctx.textAlign = "left";
+  ctx.restore();
+}
+
+function drawBossWarningBanner() {
+  if (bossWarningTimer <= 0 || !(state === GAME.PLAYING || state === GAME.BOSS)) return;
+  const phase = Math.floor(bossWarningTimer * 8) % 2;
+  const alpha = Math.min(1, Math.max(0.35, bossWarningTimer / 0.5)) * 0.95;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  const w = 520, h = 94, x = canvas.width / 2 - w / 2, y = 248;
+  drawOverlayPanel(x, y, w, h);
+  ctx.fillStyle = phase ? "#fb7185" : "#facc15";
+  ctx.font = "bold 34px monospace";
+  ctx.textAlign = "center";
+  ctx.fillText("WARNING", canvas.width / 2, y + 40);
+  ctx.fillStyle = "#fee2e2";
+  ctx.font = "bold 16px monospace";
+  const bossCfg = getBossConfigForStage(stage);
+  const warnText = boss && boss.isHeartZero ? ((bossCfg?.name || "HEART ZERO") + " DESCENDING") : "BOSS DESCENDING";
+  ctx.fillText(warnText, canvas.width / 2, y + 68);
+  ctx.textAlign = "left";
+  ctx.restore();
+}
+
+    function drawTitleScreen() {
+      drawBackground();
+      const textCfg = getTextConfig();
+      const cx = canvas.width / 2;
+      ctx.fillStyle = "rgba(0,0,0,0.22)";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      drawOverlayPanel(44, 72, canvas.width - 88, 136);
+      ctx.fillStyle = "#67e8f9"; ctx.font = "bold 30px monospace"; ctx.textAlign = "center"; ctx.fillText(textCfg.titleEn || "GALACTIC PARADE", cx, 124);
+      ctx.fillStyle = "#facc15"; ctx.font = "bold 20px monospace"; ctx.fillText(textCfg.titleJa || "ギャラクティック・パレード", cx, 158);
+      ctx.fillStyle = "#a5b4cf"; ctx.font = "14px monospace"; ctx.fillText(textCfg.tagline1 || "Beyond the smile, the parade has gone mad.", cx, 186);
+
+      const diff = currentDiff();
+      const buttons = titleButtons();
+      drawMenuButton(buttons[0].x, buttons[0].y, buttons[0].w, buttons[0].h, "DIFFICULTY", diff.label, selectedTitleButton === 0, "#67e8f9");
+      drawMenuButton(buttons[1].x, buttons[1].y, buttons[1].w, buttons[1].h, "BGM", bgmEnabled ? "ON" : "OFF", selectedTitleButton === 1, "#4ade80");
+      drawMenuButton(buttons[2].x, buttons[2].y, buttons[2].w, buttons[2].h, "BGM VOL", Math.round(bgmVolume * 100) + "%", selectedTitleButton === 2, "#38bdf8", bgmVolume);
+      drawMenuButton(buttons[3].x, buttons[3].y, buttons[3].w, buttons[3].h, "SE VOL", Math.round(seVolume * 100) + "%", selectedTitleButton === 3, "#fb7185", seVolume);
+      drawMenuButton(buttons[4].x, buttons[4].y, buttons[4].w, buttons[4].h, "START", "TAP TO PLAY", selectedTitleButton === 4, "#facc15");
+
+      ctx.fillStyle = "#cbd5e1";
+      ctx.font = "13px monospace";
+      ctx.fillText("縦持ち推奨 / 画面をなぞって移動 / ショット自動", cx, canvas.height - 62);
+      ctx.fillText("ボムは右下ボタン", cx, canvas.height - 38);
+      ctx.textAlign = "left";
+    }
+    function drawEnding() {
+      ctx.fillStyle = "rgba(0,0,0,0.68)"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+      drawOverlayPanel(150, 100, 600, 400);
+      ctx.fillStyle = "#4ade80"; ctx.font = "bold 34px monospace"; ctx.textAlign = "center"; ctx.fillText("CONGRATULATIONS!", 450, 170);
+      ctx.fillStyle = "#facc15"; ctx.font = "bold 24px monospace"; ctx.fillText("STAGE 40 CLEAR", 450, 210);
+      ctx.fillStyle = "#e5e7eb"; ctx.font = "18px monospace";
+      ctx.fillText("敵の侵攻を食い止めた。", 450, 280);
+      ctx.fillText("君の勝利だ。", 450, 316);
+      ctx.fillText("FINAL SCORE " + score, 450, 370);
+      ctx.fillStyle = "#9fb0c9"; ctx.font = "14px monospace";
+      ctx.fillText("しばらくするとタイトルに戻ります", 450, 452);
+      ctx.textAlign = "left";
+    }
+
+    
+
+function drawIntroPanel(x, y, w, h, fill = "#0b1220", border = "#334155") {
+  ctx.fillStyle = fill;
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = border;
+  ctx.lineWidth = 3;
+  ctx.strokeRect(x + 1.5, y + 1.5, w - 3, h - 3);
+}
+
+const introCanvas = document.createElement("canvas");
+introCanvas.width = 320;
+introCanvas.height = 180;
+const ictx = introCanvas.getContext("2d", { alpha: false });
+ictx.imageSmoothingEnabled = false;
+
+const introStars = Array.from({ length: 90 }, (_, i) => ({
+  x: (i * 37) % 320,
+  y: (i * 53) % 100,
+  s: i % 7 === 0 ? 2 : 1,
+  phase: (i * 0.37) % (Math.PI * 2)
+}));
+const introBalloons = [
+  { x: 24, y: 82, c: "#f59e0b", p: 0.0 },
+  { x: 34, y: 68, c: "#fb7185", p: 1.2 },
+  { x: 280, y: 56, c: "#fb7185", p: 0.8 },
+  { x: 294, y: 74, c: "#67e8f9", p: 1.7 },
+  { x: 200, y: 64, c: "#86efac", p: 2.1 },
+  { x: 215, y: 82, c: "#facc15", p: 2.6 }
+];
+
+function ipx(x, y, w, h, c) {
+  ictx.fillStyle = c;
+  ictx.fillRect(Math.round(x), Math.round(y), Math.round(w), Math.round(h));
+}
+function iline(x1, y1, x2, y2, c, w = 1) {
+  ictx.strokeStyle = c;
+  ictx.lineWidth = w;
+  ictx.beginPath();
+  ictx.moveTo(Math.round(x1) + 0.5, Math.round(y1) + 0.5);
+  ictx.lineTo(Math.round(x2) + 0.5, Math.round(y2) + 0.5);
+  ictx.stroke();
+}
+function icircle(x, y, r, c, stroke = null) {
+  ictx.fillStyle = c;
+  ictx.beginPath();
+  ictx.arc(x, y, r, 0, Math.PI * 2);
+  ictx.fill();
+  if (stroke) {
+    ictx.strokeStyle = stroke;
+    ictx.lineWidth = 1;
+    ictx.stroke();
+  }
+}
+function introGradient(top, mid, bottom) {
+  for (let y = 0; y < 180; y++) {
+    const t = y / 179;
+    function hx(v) { return parseInt(v, 16); }
+    function mix(a, b, m) { return Math.round(a * (1 - m) + b * m); }
+    const a = t < 0.6 ? top : mid;
+    const b = t < 0.6 ? mid : bottom;
+    const m = t < 0.6 ? t / 0.6 : (t - 0.6) / 0.4;
+    const c = "#" + [1, 3, 5].map(i => {
+      const av = hx(a.slice(i, i + 2));
+      const bv = hx(b.slice(i, i + 2));
+      return mix(av, bv, m).toString(16).padStart(2, "0");
+    }).join("");
+    ipx(0, y, 320, 1, c);
+  }
+}
+function drawIntroStars(t, paletteA = "#dbeafe", paletteB = "#93c5fd") {
+  for (const s of introStars) {
+    const bright = Math.sin(t * 1.8 + s.phase) > 0.55;
+    ipx(s.x, s.y, s.s, s.s, bright ? paletteA : paletteB);
+  }
+  ipx(250, 18, 18, 18, "#1d4ed8");
+  ipx(258, 26, 2, 2, "#3b82f6");
+  ipx(275, 28, 9, 9, "#312e81");
+}
+function drawFirework(x, y, t, c1, c2) {
+  const pulse = 10 + Math.sin(t * 4) * 3;
+  for (let i = 0; i < 8; i++) {
+    const a = Math.PI * 2 / 8 * i + t * 0.2;
+    const ex = x + Math.cos(a) * pulse;
+    const ey = y + Math.sin(a) * pulse;
+    iline(x, y, ex, ey, i % 2 === 0 ? c1 : c2, 2);
+  }
+  ipx(x - 1, y - 1, 3, 3, "#fff7ed");
+}
+function drawFerrisWheel(x, y, r, t) {
+  icircle(x, y, r, "#0b1020", "#facc15");
+  icircle(x, y, r - 4, "#09101c", "#67e8f9");
+  for (let i = 0; i < 8; i++) {
+    const a = Math.PI * 2 / 8 * i + t * 0.8;
+    const ex = x + Math.cos(a) * (r - 5);
+    const ey = y + Math.sin(a) * (r - 5);
+    iline(x, y, ex, ey, "#f59e0b", 2);
+    ipx(ex - 2, ey - 2, 4, 4, i % 2 === 0 ? "#fb7185" : "#facc15");
+  }
+  ipx(x - 2, y, 4, 28, "#ef4444");
+  iline(x, y + 20, x - 14, y + 34, "#ef4444", 2);
+  iline(x, y + 20, x + 14, y + 34, "#ef4444", 2);
+}
+function drawRibbon(yBase, amp, t, c) {
+  ictx.strokeStyle = c;
+  ictx.lineWidth = 3;
+  ictx.beginPath();
+  for (let x = 0; x <= 320; x += 8) {
+    const y = yBase + Math.sin((x / 28) + t * 1.5) * amp;
+    if (x === 0) ictx.moveTo(x, y);
+    else ictx.lineTo(x, y);
+  }
+  ictx.stroke();
+}
+function drawParkBuildings(t) {
+  const cols = ["#1d4ed8", "#2563eb", "#0ea5e9", "#7c3aed", "#f59e0b", "#fb7185"];
+  const bases = [26, 44, 62, 86, 112, 136, 156, 182, 208, 234];
+  for (let i = 0; i < bases.length; i++) {
+    const x = bases[i];
+    const w = i % 3 === 0 ? 24 : 18;
+    const h = 18 + (i % 4) * 8;
+    ipx(x, 132 - h, w, h, cols[i % cols.length]);
+    ipx(x + 3, 132 - h - 8, w - 6, 8, i % 2 === 0 ? "#facc15" : "#fbcfe8");
+    for (let yy = 132 - h + 4; yy < 130; yy += 8) {
+      for (let xx = x + 3; xx < x + w - 4; xx += 6) {
+        ipx(xx, yy, 3, 3, ((xx + yy + i) % 2 === 0) ? "#fef08a" : "#fff7ed");
+      }
+    }
+  }
+  icircle(46, 126, 14, "#38bdf8", "#dbeafe");
+  ipx(32, 126, 28, 10, "#0ea5e9");
+  icircle(122, 128, 11, "#60a5fa", "#dbeafe");
+  ipx(111, 128, 22, 8, "#38bdf8");
+  icircle(214, 128, 12, "#67e8f9", "#dbeafe");
+  ipx(202, 128, 24, 8, "#38bdf8");
+  ipx(268, 64, 22, 68, "#dbeafe");
+  ipx(274, 52, 10, 12, "#93c5fd");
+  ipx(265, 132, 28, 12, "#ef4444");
+  const flameH = 10 + Math.floor((Math.sin(t * 9) + 1) * 3);
+  ipx(273, 144, 12, flameH, "#f59e0b");
+  ipx(276, 144, 6, flameH + 4, "#fef08a");
+}
+function drawForegroundMascots(t) {
+  const bob = Math.sin(t * 2) * 1.5;
+  ipx(24, 130 + bob, 22, 30, "#93c5fd");
+  ipx(26, 112 + bob, 6, 18, "#bfdbfe");
+  ipx(38, 112 + bob, 6, 18, "#bfdbfe");
+  ipx(30, 156 + bob, 10, 6, "#fbcfe8");
+  ipx(86, 132 - bob, 24, 30, "#8b5e3c");
+  ipx(84, 126 - bob, 10, 8, "#ef4444");
+  ipx(102, 126 - bob, 10, 8, "#2563eb");
+  ipx(92, 156 - bob, 6, 6, "#f59e0b");
+  ipx(100, 156 - bob, 6, 6, "#67e8f9");
+  ipx(132, 136 + bob, 18, 24, "#60a5fa");
+  ipx(136, 130 + bob, 10, 6, "#bfdbfe");
+  ipx(129, 142 + bob, 3, 10, "#facc15");
+  ipx(150, 142 + bob, 3, 10, "#facc15");
+  ipx(148, 142 + bob - Math.sin(t * 3.5) * 3, 8, 3, "#93c5fd");
+}
+function drawBalloons(t) {
+  for (const b of introBalloons) {
+    const by = b.y + Math.sin(t * 2 + b.p) * 3;
+    icircle(b.x, by, 4, b.c);
+    iline(b.x, by + 4, b.x - 1, by + 18, "#dbeafe", 1);
+  }
+}
+function drawWater(t) {
+  for (let y = 145; y < 180; y += 4) {
+    const off = Math.sin(t * 2 + y * 0.2) * 2;
+    ipx(160 + off, y, 130, 2, "#1d4ed8");
+    ipx(175 - off, y + 1, 95, 1, "#38bdf8");
+    ipx(190 + off, y + 2, 60, 1, "#f59e0b");
+  }
+}
+function drawBossSilhouette(t) {
+  icircle(255, 86, 36, "#05070b");
+  ipx(223, 54, 64, 16, "#05070b");
+  ipx(208, 76, 18, 14, "#05070b");
+  ipx(286, 76, 18, 14, "#05070b");
+  ipx(238, 84, 10, 4, "#fb7185");
+  ipx(264, 84, 10, 4, "#fb7185");
+  for (let i = 0; i < 10; i++) {
+    const bx = 30 + i * 22 + ((i % 2) ? Math.sin(t * 3) * 2 : 0);
+    const by = 48 + (i % 3) * 14;
+    ipx(bx, by, 5, 5, "#fca5a5");
+  }
+  for (let i = 0; i < 9; i++) {
+    const bx = 280 - i * 18;
+    const by = 56 + (i % 4) * 12;
+    ipx(bx, by, 3, 10, "#fef08a");
+  }
+}
+function drawHangarScene(t) {
+  for (let y = 0; y < 180; y++) ipx(0, y, 320, 1, y < 110 ? "#0b1220" : "#111827");
+  for (let x = 0; x < 320; x += 24) iline(x, 72, x, 180, "#1f2937", 2);
+  for (let y = 72; y < 180; y += 18) iline(0, y, 320, y, "#1f2937", 2);
+  const shipY = 102 + Math.sin(t * 3) * 1.5;
+  ipx(145, shipY - 28, 30, 54, "#67e8f9");
+  ipx(156, shipY - 42, 8, 14, "#e2e8f0");
+  ipx(132, shipY + 0, 10, 22, "#38bdf8");
+  ipx(178, shipY + 0, 10, 22, "#38bdf8");
+  ipx(157, shipY + 26, 6, 10, "#f59e0b");
+  ipx(126, 140, 68, 8, "#334155");
+  ipx(248, 94, 18, 34, "#0f172a");
+  ipx(251, 84, 12, 10, "#0f172a");
+  ipx(262, 100, 6, 2, "#67e8f9");
+  const blink = Math.sin(t * 5) > 0 ? "#facc15" : "#fb7185";
+  ipx(42, 38, 6, 6, blink);
+  ipx(270, 40, 6, 6, blink);
+}
+function drawLaunchScene(t, local) {
+  introGradient("#08122a", "#04070c", "#020305");
+  drawIntroStars(t, "#dbeafe", "#67e8f9");
+  for (let i = 0; i < 15; i++) {
+    ipx(22 + i * 18, 120 - Math.floor(i / 2), 10, 58 + i * 2, "#0f172a");
+    ipx(22 + i * 18, 120 - Math.floor(i / 2), 4, 58 + i * 2, "#1d4ed8");
+  }
+  const sx = 120 + local * 120;
+  const sy = 105 - local * 36;
+  ipx(sx, sy - 32, 32, 56, "#67e8f9");
+  ipx(sx + 12, sy - 46, 8, 14, "#e2e8f0");
+  ipx(sx - 10, sy + 4, 10, 20, "#38bdf8");
+  ipx(sx + 32, sy + 4, 10, 20, "#38bdf8");
+  const flame = 12 + Math.floor((Math.sin(t * 10) + 1) * 4);
+  ipx(sx + 13, sy + 24, 6, flame, "#f59e0b");
+  ipx(sx + 14, sy + 24, 4, flame + 4, "#fef08a");
+  for (let i = 0; i < 10; i++) ipx(200 + i * 12, 55 + i * 5, 8, 2, "#67e8f9");
+}
+function drawRetroWorld(cut, t) {
+  const local = (t % 5) / 5;
+  if (cut === 5) { drawHangarScene(t); return; }
+  if (cut === 6) { drawLaunchScene(t, local); return; }
+
+  const glitch = cut === 3;
+  const danger = cut === 4;
+  introGradient(glitch ? "#240611" : "#13203d", glitch ? "#10040b" : "#090f1c", "#040507");
+  drawIntroStars(t, "#dbeafe", danger ? "#fca5a5" : "#93c5fd");
+  drawFerrisWheel(44, 56, 28, t);
+  drawRibbon(40, 6, t, "#fb7185");
+  drawRibbon(48, 5, t + 0.7, "#facc15");
+  drawRibbon(58, 5, t + 1.3, "#67e8f9");
+  drawParkBuildings(t);
+  drawBalloons(t);
+  drawWater(t);
+  if (cut >= 1) {
+    drawFirework(34, 78, t, "#fef08a", "#67e8f9");
+    drawFirework(258, 68, t + 0.7, "#f59e0b", "#fb7185");
+  }
+  if (cut === 2) drawForegroundMascots(t);
+  if (glitch) {
+    for (let i = 0; i < 14; i++) ipx(i * 24, 0, 10, 180, "#2a050c88");
+    for (let i = 0; i < 36; i++) ipx((i * 29) % 320, (i * 17) % 180, 10, 3, i % 2 ? "#fb718588" : "#67e8f944");
+  }
+  if (danger) drawBossSilhouette(t);
+}
+
+function drawIntro() {
+  const t = introTime;
+  const fadeAlpha = introSkipping ? Math.min(1, introSkipFade / INTRO_SKIP_FADE) : 0;
+  const introState = getIntroCutState(t);
+  const cut = Math.min(7, introState.index);
+  const local = introState.local;
+  const alpha = Math.min(1, Math.min(local * 2.2, (1 - local) * 2.2 + 0.2));
+  const introMeta = introState.cut || {};
+  const textCfg = getTextConfig();
+
+  ictx.imageSmoothingEnabled = false;
+  drawRetroWorld(cut, t);
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(introCanvas, 0, 0, canvas.width, canvas.height);
+
+  ctx.fillStyle = "rgba(0,0,0,0.16)";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.globalAlpha = alpha;
+
+  const lines = String(introMeta.text || "").split("\n");
+
+  if (cut === 0) {
+    drawOverlayPanel(170, 185, 560, 120);
+    ctx.fillStyle = "#dbeafe";
+    ctx.font = "bold 22px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText(lines[0] || "宇宙最大の移動遊園船団", 450, 232);
+    ctx.fillStyle = "#67e8f9";
+    ctx.font = "bold 34px monospace";
+    ctx.fillText(lines[1] || (textCfg.titleJa || "ギャラクティック・パレード"), 450, 278);
+  } else if (cut === 1 || cut === 2 || cut === 5) {
+    drawOverlayPanel(cut === 1 ? 110 : cut === 2 ? 205 : 190, cut === 1 ? 405 : 422, cut === 1 ? 680 : cut === 2 ? 490 : 520, cut === 1 ? 82 : cut === 2 ? 70 : 92);
+    ctx.fillStyle = cut === 2 ? "#fef3c7" : "#e5e7eb";
+    ctx.font = cut === 2 ? "bold 26px monospace" : cut === 5 ? "bold 22px monospace" : "bold 20px monospace";
+    ctx.textAlign = "center";
+    lines.forEach((line, i) => ctx.fillText(line, 450, (cut === 1 ? 455 : cut === 2 ? 466 : 460) + i * 34));
+  } else if (cut === 3 || cut === 4) {
+    drawOverlayPanel(cut === 3 ? 160 : 85, cut === 3 ? 420 : 410, cut === 3 ? 580 : 730, cut === 3 ? 86 : 110);
+    ctx.textAlign = "center";
+    lines.forEach((line, i) => {
+      ctx.fillStyle = (cut === 4 && i === lines.length - 1) ? "#facc15" : (cut === 3 && i === lines.length - 1 ? "#fb7185" : "#e5e7eb");
+      ctx.font = "bold " + (cut === 4 ? 20 : 24) + "px monospace";
+      ctx.fillText(line, 450, (cut === 3 ? 458 : 456) + i * 34);
+    });
+  } else if (cut === 6) {
+    drawOverlayPanel(150, 110, 600, 70);
+    ctx.fillStyle = "#facc15";
+    ctx.font = "bold 28px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText(lines[0] || "終わらないパレードに、幕を下ろせ。", 450, 154);
+  } else {
+    drawOverlayPanel(165, 165, 570, 200);
+    ctx.fillStyle = "#67e8f9";
+    ctx.font = "bold 38px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText(textCfg.titleEn || "GALACTIC PARADE", 450, 235);
+    ctx.fillStyle = "#facc15";
+    ctx.font = "bold 22px monospace";
+    ctx.fillText(textCfg.titleJa || "ギャラクティック・パレード", 450, 275);
+    ctx.fillStyle = "#dbeafe";
+    ctx.font = "bold 16px monospace";
+    ctx.fillText(textCfg.tagline1 || "Beyond the smile, the parade has gone mad.", 450, 320);
+    ctx.fillText(textCfg.tagline2 || "Stop the endless parade.", 450, 348);
+  }
+
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = "rgba(0,0,0,0.5)";
+  ctx.fillRect(610, 550, 250, 30);
+  ctx.fillStyle = "#e5e7eb";
+  ctx.font = "bold 14px monospace";
+  ctx.textAlign = "center";
+  ctx.fillText("ENTER / SPACE / ESC / TAP TO SKIP", 735, 570);
+  ctx.textAlign = "left";
+
+  if (introSkipping) {
+    ctx.fillStyle = `rgba(0,0,0,${fadeAlpha})`;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
+}
+function render() {
+
+      if (state === GAME.INTRO) {
+        drawBackground();
+        drawIntro();
+        return;
+      }
+      drawBackground();
+      const shakingAllowed = (state === GAME.PLAYING || state === GAME.BOSS) && shake > 0;
+      const ox = shakingAllowed ? (Math.random() - 0.5) * shake : 0;
+      const oy = shakingAllowed ? (Math.random() - 0.5) * shake : 0;
+      ctx.save(); ctx.translate(ox, oy);
+      drawPickups(); drawBullets(); drawEnemyBullets(); drawEnemies(); drawBoss(); drawParticles(); drawPlayer();
+      ctx.restore();
+      drawHud(); drawTouchUI(); drawStageIntroBanner(); drawBossWarningBanner();
+
+      if (state === GAME.TITLE) drawTitleScreen();
+      else if (state === GAME.PAUSED) drawOverlay("PAUSED", ["ENTER か P で再開"], "#facc15");
+      else if (state === GAME.CLEAR) drawOverlay("STAGE CLEAR!", ["SCORE " + score, "ENTER / TAP で次のステージへ"], "#4ade80");
+      else if (state === GAME.GAME_OVER) drawOverlay("GAME OVER", ["SCORE " + score, "HIGH " + highScore, "ENTER または タップでタイトルへ"], "#fb7185");
+      else if (state === GAME.ENDING) drawEnding();
+    }
+
+    function loop(t) {
+      if (!lastTime) lastTime = t;
+      const delta = Math.min(0.033, (t - lastTime) / 1000);
+      lastTime = t;
+      update(delta);
+      render();
+      requestAnimationFrame(loop);
+    }
+
+    updateTouchPads();
+    initStars();
+    applyAudioVolumes();
+    requestAnimationFrame(loop);
+  })();
+  </script>
+</body>
+</html>
